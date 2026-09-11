@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文献阅读整理Agent - UI原型</title>
+    <style>
+        :root {
+            /* 浅色主题变量 */
+            --bg-main: #ffffff;
+            --bg-sidebar: #F5F7FA;
+            --bg-card: #ffffff;
+            --bg-upload: #ffffff;
+            --primary: #E8F4F8;
+            --text-title: #1D2129;
+            --text-body: #1D2129;
+            --text-aux: #86909C;
+            --border: #E5E6EB;
+            --success: #52C41A;
+            --warn: #FAAD14;
+            --error: #FF4D4F;
+            --shadow: rgba(0,0,0,0.06);
+        }
+        [data-theme="dark"] {
+            /* 深色主题变量 */
+            --bg-main: #1F2937;
+            --bg-sidebar: #273444;
+            --bg-card: #273444;
+            --bg-upload: #273444;
+            --primary: #E8F4F8;
+            --text-title: #F9FAFB;
+            --text-body: #F9FAFB;
+            --text-aux: #9CA3AF;
+            --border: #374151;
+            --shadow: rgba(0,0,0,0.25);
+        }
+        * {
+            margin:0;
+            padding:0;
+            box-sizing: border-box;
+            font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
+        }
+        body {
+            height:100vh;
+            overflow:hidden;
+            background: var(--bg-main);
+            color: var(--text-body);
+            display:flex;
+            flex-direction:column;
+        }
+        /* 顶部全局导航栏 40px */
+        .app-header {
+            height:40px;
+            background: var(--bg-sidebar);
+            border-bottom:1px solid var(--border);
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            padding:0 12px;
+            flex-shrink:0;
+        }
+        .header-left {
+            display:flex;
+            align-items:center;
+            gap:8px;
+            font-weight:bold;
+            color:var(--text-title);
+        }
+        .header-icon {
+            width:20px;
+            height:20px;
+            display:inline-flex;
+            align-items:center;
+            justify-content:center;
+        }
+        .header-right {
+            display:flex;
+            gap:4px;
+        }
+        .win-btn {
+            width:28px;
+            height:28px;
+            border-radius:4px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            cursor:pointer;
+            color:var(--text-aux);
+        }
+        .win-btn:hover {
+            background:rgba(128,128,128,0.12);
+            color:var(--text-title);
+        }
+        /* 主体容器：左侧导航 + 右侧内容 */
+        .app-body {
+            display:flex;
+            flex:1;
+            overflow:hidden;
+        }
+        /* 左侧固定导航栏 220px */
+        .sidebar {
+            width:220px;
+            background:var(--bg-sidebar);
+            border-right:1px solid var(--border);
+            flex-shrink:0;
+            overflow-y:auto;
+            padding:12px 0;
+        }
+        .nav-item {
+            padding:9px 16px;
+            display:flex;
+            align-items:center;
+            gap:10px;
+            cursor:pointer;
+            font-size:14px;
+            color:var(--text-body);
+        }
+        .nav-item:hover {
+            background:rgba(0,0,0,0.05);
+        }
+        .nav-item.active {
+            background:var(--primary);
+            color:#1D2129;
+        }
+        .nav-fold-header {
+            padding:9px 16px;
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            cursor:pointer;
+            font-size:14px;
+        }
+        .nav-fold-body {
+            padding-left:28px;
+            display:none;
+        }
+        .nav-fold-body.open {
+            display:block;
+        }
+        .nav-sub-item {
+            padding:7px 12px;
+            font-size:13px;
+            cursor:pointer;
+            color:var(--text-aux);
+        }
+        .nav-sub-item:hover {
+            background:rgba(0,0,0,0.05);
+            color:var(--text-body);
+        }
+        /* 右侧主内容区 */
+        .main-content {
+            flex:1;
+            overflow:auto;
+            padding:20px;
+        }
+        .page {
+            display:none;
+        }
+        .page.active {
+            display:block;
+        }
+        /* 通用组件 */
+        .btn {
+            padding:7px 14px;
+            border-radius:6px;
+            border:1px solid var(--border);
+            background:var(--bg-card);
+            color:var(--text-body);
+            cursor:pointer;
+            font-size:13px;
+        }
+        .btn-primary {
+            background:var(--primary);
+            border-color:#c7e4ec;
+            color:#111827;
+        }
+        .btn:hover {
+            opacity:0.9;
+        }
+        .card {
+            background:var(--bg-card);
+            border:1px solid var(--border);
+            border-radius:8px;
+            padding:16px;
+        }
+        .gap-row {
+            display:flex;
+            gap:10px;
+            margin-bottom:16px;
+            flex-wrap:wrap;
+        }
+        .tip-text {
+            color:var(--text-aux);
+            font-size:12px;
+        }
+        /* 文献导入页面 */
+        .upload-box {
+            border:2px dashed var(--border);
+            border-radius:10px;
+            min-height:220px;
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            justify-content:center;
+            gap:10px;
+            padding:20px;
+            margin-bottom:20px;
+        }
+        .table-wrap {
+            border:1px solid var(--border);
+            border-radius:8px;
+            overflow:hidden;
+        }
+        table {
+            width:100%;
+            border-collapse:collapse;
+        }
+        th,td {
+            padding:10px 12px;
+            text-align:left;
+            border-bottom:1px solid var(--border);
+            font-size:13px;
+        }
+        th {
+            background:var(--bg-sidebar);
+        }
+        .status-success {color:var(--success)}
+        .status-warn {color:var(--warn)}
+        .status-error {color:var(--error)}
+        /* 文献解析页面布局：左右分栏 */
+        .parse-container {
+            display:grid;
+            grid-template-columns: 1fr 1fr;
+            gap:16px;
+            height:calc(100vh - 180px);
+        }
+        .parse-viewer {
+            border:1px solid var(--border);
+            border-radius:8px;
+            padding:12px;
+            overflow:auto;
+        }
+        .parse-report {
+            border:1px solid var(--border);
+            border-radius:8px;
+            padding:12px;
+            overflow:auto;
+        }
+        .collapse-block {
+            border:1px solid var(--border);
+            border-radius:6px;
+            margin-bottom:8px;
+        }
+        .collapse-head {
+            padding:8px 12px;
+            cursor:pointer;
+            background:var(--bg-sidebar);
+        }
+        .collapse-body {
+            padding:10px 12px;
+            display:none;
+        }
+        .collapse-body.open {
+            display:block;
+        }
+        .highlight-block {
+            background:var(--primary);
+            padding:6px 8px;
+            border-radius:4px;
+        }
+        /* 文献检索页面 */
+        .search-bar {
+            display:flex;
+            gap:10px;
+            margin-bottom:16px;
+        }
+        input[type="text"], select {
+            padding:8px 10px;
+            border:1px solid var(--border);
+            border-radius:6px;
+            background:var(--bg-card);
+            color:var(--text-body);
+        }
+        .doc-card-list {
+            display:grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px,1fr));
+            gap:12px;
+        }
+        .doc-card {
+            border:1px solid var(--border);
+            border-radius:8px;
+            padding:12px;
+        }
+        .doc-card:hover {
+            box-shadow:0 2px 8px var(--shadow);
+        }
+        .tag {
+            display:inline-block;
+            font-size:11px;
+            padding:2px 6px;
+            border-radius:4px;
+            background:var(--primary);
+            margin:2px;
+        }
+        .empty-tip {
+            text-align:center;
+            padding:40px;
+            color:var(--text-aux);
+        }
+        /* 笔记批注页面：左右阅读+编辑 */
+        .note-container {
+            display:grid;
+            grid-template-columns: 1fr 0.85fr;
+            gap:16px;
+            height:calc(100vh - 180px);
+        }
+        .note-read-area {
+            border:1px solid var(--border);
+            border-radius:8px;
+            padding:14px;
+            overflow:auto;
+        }
+        .note-edit-area {
+            border:1px solid var(--border);
+            border-radius:8px;
+            display:flex;
+            flex-direction:column;
+        }
+        .note-tab-bar {
+            display:flex;
+            border-bottom:1px solid var(--border);
+        }
+        .note-tab {
+            padding:9px 14px;
+            cursor:pointer;
+            font-size:13px;
+        }
+        .note-tab.active {
+            border-bottom:2px solid #4096bb;
+        }
+        .note-textarea {
+            flex:1;
+            background:transparent;
+            border:none;
+            padding:12px;
+            color:var(--text-body);
+            resize:none;
+            outline:none;
+        }
+        /* 管理中心页面 */
+        .setting-group {
+            margin-bottom:24px;
+        }
+        .setting-group h4 {
+            margin-bottom:10px;
+        }
+        .setting-row {
+            display:flex;
+            align-items:center;
+            gap:10px;
+            margin:8px 0;
+        }
+        /* 弹窗模态框 */
+        .modal-mask {
+            position:fixed;
+            inset:0;
+            background:rgba(0,0,0,0.4);
+            display:none;
+            align-items:center;
+            justify-content:center;
+            z-index:99;
+        }
+        .modal-mask.open {
+            display:flex;
+        }
+        .modal-box {
+            background:var(--bg-card);
+            border-radius:8px;
+            border:1px solid var(--border);
+            min-width:340px;
+            max-width:90vw;
+            padding:20px;
+        }
+        .modal-footer {
+            display:flex;
+            justify-content:flex-end;
+            gap:8px;
+            margin-top:16px;
+        }
+        /* toast提示 */
+        .toast-wrap {
+            position:fixed;
+            top:50px;
+            left:50%;
+            transform:translateX(-50%);
+            z-index:100;
+        }
+        .toast-item {
+            background:#222;
+            color:#fff;
+            padding:8px 16px;
+            border-radius:6px;
+            margin:4px 0;
+            font-size:13px;
+        }
+        /* loading */
+        .loading-text {
+            color:var(--text-aux);
+        }
+    </style>
+</head>
+<body>
+    <!-- 顶部栏 -->
+    <div class="app-header">
+        <div class="header-left">
+            <span class="header-icon">📖</span>
+            <span>文献阅读整理Agent</span>
+        </div>
+        <div class="header-right">
+            <div class="win-btn" id="toggleTheme">🌓</div>
+            <div class="win-btn">─</div>
+            <div class="win-btn">□</div>
+            <div class="win-btn">✕</div>
+        </div>
+    </div>
+
+    <div class="app-body">
+        <!-- 左侧导航 -->
+        <div class="sidebar">
+            <div class="nav-item active" data-page="page-import">
+                <span>📥</span>
+                <span>文献导入</span>
+            </div>
+            <div class="nav-item" data-page="page-parse">
+                <span>🔍</span>
+                <span>文献解析</span>
+            </div>
+            <div class="nav-item" data-page="page-search">
+                <span>📚</span>
+                <span>文献检索</span>
+            </div>
+            <div class="nav-item" data-page="page-note">
+                <span>✏️</span>
+                <span>笔记批注</span>
+            </div>
+
+            <div class="nav-fold-header" id="foldManage">
+                <span>⚙️ 管理中心</span>
+            </div>
+            <div class="nav-fold-body" id="foldManageBody">
+                <div class="nav-sub-item" data-page="page-setting">系统设置</div>
+                <div class="nav-sub-item" data-page="page-setting">资料导出备份</div>
+                <div class="nav-sub-item" data-page="page-setting">标签管理</div>
+            </div>
+        </div>
+
+        <!-- 右侧主内容区 -->
+        <div class="main-content">
+            <!-- 1 文献导入页面 -->
+            <div class="page active" id="page-import">
+                <h3>文献导入</h3>
+                <p class="tip-text">支持 PDF / TXT / DOC / DOCX，支持拖拽上传与批量导入</p>
+                <div class="upload-box">
+                    <div style="font-size:32px;">📂</div>
+                    <div>拖拽PDF/TXT/Word文献至此导入</div>
+                    <button class="btn btn-primary">点击选择文件</button>
+                </div>
+
+                <div class="gap-row">
+                    <button class="btn">批量重新导入失败项</button>
+                    <button class="btn">清空失败记录</button>
+                    <button class="btn" id="openConfirmModal">清空全部导入记录</button>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>文件名</th>
+                                <th>格式</th>
+                                <th>导入时间</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>深度学习综述.pdf</td>
+                                <td>PDF</td>
+                                <td>2026‑09‑10</td>
+                                <td><span class="status-success">导入成功</span></td>
+                                <td><button class="btn">预览</button> <button class="btn">加入资料库</button></td>
+                            </tr>
+                            <tr>
+                                <td>实验报告.docx</td>
+                                <td>DOCX</td>
+                                <td>2026‑09‑10</td>
+                                <td><span class="status-warn">导入中 68%</span></td>
+                                <td><button class="btn">取消</button></td>
+                            </tr>
+                            <tr>
+                                <td>损坏文献.pdf</td>
+                                <td>PDF</td>
+                                <td>2026‑09‑10</td>
+                                <td><span class="status-error">导入失败：文件损坏</span></td>
+                                <td><button class="btn">重新导入</button></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 2 文献解析页面 -->
+            <div class="page" id="page-parse">
+                <h3>文献解析</h3>
+                <div class="gap-row">
+                    <select>
+                        <option>选择资料库文献：深度学习综述.pdf</option>
+                    </select>
+                    <button class="btn btn-primary">开始解析</button>
+                    <button class="btn">停止解析</button>
+                    <button class="btn">重新解析</button>
+                </div>
+                <div style="margin-bottom:10px;">进度条：<div style="height:6px;background:var(--border);border-radius:3px;width:100%;"><div style="width:42%;height:100%;background:#52C41A;border-radius:3px;"></div></div></div>
+
+                <div class="parse-container">
+                    <div class="parse-viewer">
+                        <h4>文献预览区</h4>
+                        <p class="tip-text">原文阅读，基础翻页缩放功能</p>
+                        <div style="margin-top:12px;">
+                            <p>【论文标题】深度学习在计算机视觉中的应用综述</p>
+                            <p>摘要：随着深度学习技术快速发展，其在视觉任务中取得大量突破……</p>
+                            <p>……（模拟PDF原文内容）……</p>
+                        </div>
+                    </div>
+                    <div class="parse-report">
+                        <h4>结构化解析报告</h4>
+                        <div class="collapse-block">
+                            <div class="collapse-head toggle-collapse">📄 文献基础信息 ▼</div>
+                            <div class="collapse-body open">
+                                <div>标题：深度学习在计算机视觉中的应用综述</div>
+                                <div>作者：XXX</div>
+                                <div>发表时间：2025</div>
+                            </div>
+                        </div>
+                        <div class="collapse-block">
+                            <div class="collapse-head toggle-collapse">🧠 研究背景 ▼</div>
+                            <div class="collapse-body open">
+                                传统机器视觉算法存在特征手工设计的局限，大数据与GPU算力推动深度学习发展。
+                            </div>
+                        </div>
+                        <div class="collapse-block">
+                            <div class="collapse-head toggle-collapse">⭐ 创新点 ▼</div>
+                            <div class="collapse-body open">
+                                <div class="highlight-block">梳理多类CNN变体模型优缺点；提出面向小样本场景改进思路。</div>
+                            </div>
+                        </div>
+                        <div class="collapse-block">
+                            <div class="collapse-head toggle-collapse">✅ 研究结论 ▼</div>
+                            <div class="collapse-body open">
+                                <div class="highlight-block">深度学习视觉仍面临小样本、可解释性两大核心挑战。</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="gap-row" style="margin-top:12px;">
+                    <button class="btn btn-primary">导出报告</button>
+                    <button class="btn">保存至资料库</button>
+                </div>
+            </div>
+
+            <!--3 文献检索页面 -->
+            <div class="page" id="page-search">
+                <h3>文献检索</h3>
+                <div class="search-bar">
+                    <input type="text" placeholder="输入关键词，检索标题/作者/正文/笔记">
+                    <select>
+                        <option>全部标签</option>
+                    </select>
+                    <select>
+                        <option>全部时间</option>
+                    </select>
+                    <button class="btn btn-primary">检索</button>
+                </div>
+
+                <div class="gap-row">
+                    <button class="btn">批量归类</button>
+                    <button class="btn">批量添加标签</button>
+                    <button class="btn">批量导出</button>
+                    <button class="btn">批量删除</button>
+                </div>
+
+                <div class="doc-card-list">
+                    <div class="doc-card">
+                        <div><strong>深度学习综述</strong></div>
+                        <div class="tip-text">作者：张三｜2025</div>
+                        <div>
+                            <span class="tag">综述</span>
+                            <span class="tag">计算机视觉</span>
+                        </div>
+                        <div class="gap-row" style="margin-top:8px;">
+                            <button class="btn">预览</button>
+                            <button class="btn">解析</button>
+                        </div>
+                    </div>
+                    <div class="doc-card">
+                        <div><strong>大模型可解释性研究</strong></div>
+                        <div class="tip-text">作者：李四｜2025</div>
+                        <div>
+                            <span class="tag">理论分析</span>
+                        </div>
+                        <div class="gap-row" style="margin-top:8px;">
+                            <button class="btn">预览</button>
+                            <button class="btn">解析</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!--4 笔记批注页面 -->
+            <div class="page" id="page-note">
+                <h3>笔记批注</h3>
+                <div class="gap-row">
+                    <button class="btn">保存</button>
+                    <button class="btn">撤销</button>
+                    <button class="btn">重做</button>
+                    <button class="btn">查看编辑历史</button>
+                    <button class="btn">显示/隐藏批注标记</button>
+                </div>
+                <div class="note-container">
+                    <div class="note-read-area">
+                        <div style="margin-bottom:8px;">
+                            <button class="btn">高亮</button>
+                            <button class="btn">加粗</button>
+                            <button class="btn">下划线</button>
+                        </div>
+                        <p>【论文段落1】随着深度学习技术快速发展，其在视觉任务中取得大量突破。<mark>该段落可选中添加批注</mark></p>
+                        <p>【论文段落2】传统机器视觉算法存在特征手工设计的局限，大数据与GPU算力推动深度学习发展。</p>
+                    </div>
+                    <div class="note-edit-area">
+                        <div class="note-tab-bar">
+                            <div class="note-tab active">段落批注</div>
+                            <div class="note-tab">全局笔记</div>
+                        </div>
+                        <textarea class="note-textarea" placeholder="在此编辑笔记，自动保存...">
+段落批注示例：
+这里记录对该段文献的理解、疑问、摘抄素材。
+                        </textarea>
+                    </div>
+                </div>
+            </div>
+
+            <!--5 管理中心页面 -->
+            <div class="page" id="page-setting">
+                <h3>管理中心</h3>
+                <div class="setting-group">
+                    <h4>解析规则配置</h4>
+                    <div class="setting-row">
+                        <span>预设模板：</span>
+                        <select>
+                            <option>通用模板</option>
+                            <option>文科</option>
+                            <option>理科</option>
+                            <option>工科</option>
+                        </select>
+                    </div>
+                    <div class="setting-row">
+                        <span>解析精度：</span>
+                        <select>
+                            <option>标准全面</option>
+                            <option>基础精简</option>
+                            <option>深度细化</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="setting-group">
+                    <h4>存储路径配置</h4>
+                    <div class="setting-row">
+                        <span>文献存储路径：</span>
+                        <input type="text" value="D:/AgentDocs/library">
+                        <button class="btn">浏览</button>
+                    </div>
+                    <div class="setting-row">
+                        <span>磁盘占用：</span>
+                        <span>已用 2.4GB / 总 100GB</span>
+                    </div>
+                    <div class="setting-row">
+                        <button class="btn">打开存储文件夹</button>
+                        <button class="btn">清理缓存</button>
+                    </div>
+                </div>
+
+                <div class="setting-group">
+                    <h4>AI模型配置</h4>
+                    <div class="setting-row">
+                        <span>选择模型：</span>
+                        <select>
+                            <option>Model‑A</option>
+                        </select>
+                    </div>
+                    <div class="setting-row">
+                        <span>API密钥：</span>
+                        <input type="password" placeholder="输入密钥">
+                    </div>
+                </div>
+
+                <div class="setting-group">
+                    <h4>备份与导出</h4>
+                    <div class="gap-row">
+                        <button class="btn btn-primary">一键全量备份</button>
+                        <button class="btn">增量备份</button>
+                    </div>
+                </div>
+
+                <div class="setting-group">
+                    <h4>标签管理</h4>
+                    <div class="gap-row">
+                        <button class="btn">新增标签</button>
+                        <button class="btn">套用学术预设标签模板</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 确认弹窗 -->
+    <div class="modal-mask" id="confirmModal">
+        <div class="modal-box">
+            <h4>确认操作</h4>
+            <p>确定要清空全部导入记录吗？此操作不可撤销。</p>
+            <div class="modal-footer">
+                <button class="btn modal-cancel">取消</button>
+                <button class="btn btn-primary modal-ok">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- toast容器 -->
+    <div class="toast-wrap" id="toastWrap"></div>
+
+    <script>
+        // 主题切换
+        const toggleThemeBtn = document.getElementById('toggleTheme');
+        toggleThemeBtn.addEventListener('click', ()=>{
+            const html = document.documentElement;
+            if(html.getAttribute('data-theme') === 'dark'){
+                html.removeAttribute('data-theme');
+                showToast("已切换浅色主题");
+            }else{
+                html.setAttribute('data-theme','dark');
+                showToast("已切换深色主题");
+            }
+        })
+
+        // 导航切换页面
+        const navItems = document.querySelectorAll('.nav-item, .nav-sub-item');
+        navItems.forEach(item=>{
+            item.addEventListener('click',()=>{
+                const pageId = item.dataset.page;
+                if(!pageId) return;
+                // nav active
+                document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+                if(item.classList.contains('nav-item')) item.classList.add('active');
+                // page switch
+                document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+                document.getElementById(pageId).classList.add('active');
+            })
+        })
+
+        // 管理中心折叠菜单
+        const foldManage = document.getElementById('foldManage');
+        const foldBody = document.getElementById('foldManageBody');
+        foldManage.addEventListener('click',()=>{
+            foldBody.classList.toggle('open');
+        })
+
+        // 折叠块
+        document.querySelectorAll('.toggle-collapse').forEach(el=>{
+            el.addEventListener('click',function(){
+                const body = this.nextElementSibling;
+                body.classList.toggle('open');
+            })
+        })
+
+        // 确认弹窗
+        const confirmModal = document.getElementById('confirmModal');
+        document.getElementById('openConfirmModal').addEventListener('click',()=>{
+            confirmModal.classList.add('open');
+        })
+        document.querySelector('.modal-cancel').addEventListener('click',()=>{
+            confirmModal.classList.remove('open');
+        })
+        document.querySelector('.modal-ok').addEventListener('click',()=>{
+            confirmModal.classList.remove('open');
+            showToast("已执行清空操作（原型模拟）");
+        })
+
+        // toast提示
+        function showToast(msg){
+            const wrap = document.getElementById('toastWrap');
+            const div = document.createElement('div');
+            div.className = 'toast-item';
+            div.innerText = msg;
+            wrap.appendChild(div);
+            setTimeout(()=>{
+                div.remove();
+            }, 2200)
+        }
+    </script>
+</body>
+</html>
+<!-- （注：内容由AI生成） -->

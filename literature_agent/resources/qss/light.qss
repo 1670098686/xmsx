@@ -1,0 +1,487 @@
+/* ===== 文献阅读整理Agent 浅色主题 QSS 模板（占位符由 theme_manager 替换）===== */
+
+* {
+    font-family: %(font_family)s;
+    font-size: 14px;
+    color: %(text_body)s;
+    outline: none;
+}
+
+QMainWindow, QDialog {
+    background-color: %(bg_main)s;
+}
+
+/* ---------- 顶部导航栏 ---------- */
+QFrame#appHeader {
+    background-color: %(bg_sidebar)s;
+    border-bottom: 1px solid %(border)s;
+}
+QLabel#headerTitle {
+    color: %(text_title)s;
+    font-size: 15px;
+    font-weight: bold;
+}
+QToolButton#winBtn {
+    color: %(text_aux)s;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+}
+QToolButton#winBtn:hover {
+    background-color: %(hover_overlay)s;
+    color: %(text_title)s;
+}
+
+/* ---------- 左侧导航（主导航 + 管理中心折叠菜单同构，视觉为一个整体）---------- */
+QFrame#sidebar {
+    background-color: %(bg_sidebar)s;
+    border-right: 1px solid %(border)s;
+}
+QListWidget#navList {
+    background-color: %(bg_sidebar)s;
+    border: none;
+    outline: none;
+}
+QListWidget#navList::item {
+    height: 46px;
+    padding: 0 16px;
+    color: %(text_body)s;
+    border: none;
+    border-left: 3px solid transparent;
+    font-size: 15px;
+    font-weight: bold;
+}
+QListWidget#navList::item:hover {
+    background-color: %(hover_overlay)s;
+}
+QListWidget#navList::item:selected {
+    background-color: %(primary)s;
+    color: %(primary_text)s;
+    border-left: 3px solid %(primary_border)s;
+}
+
+/* 折叠菜单（与主导航项同高同字重，背景无缝衔接，不出现分割线）*/
+QFrame#foldMenu {
+    background: transparent;
+    border: none;
+}
+QToolButton#foldHeader {
+    text-align: left;
+    min-height: 46px;
+    max-height: 46px;
+    padding: 0 16px;
+    color: %(text_body)s;
+    font-size: 15px;
+    font-weight: bold;
+    background: transparent;
+    border: none;
+    border-left: 3px solid transparent;
+}
+QToolButton#foldHeader:hover {
+    background-color: %(hover_overlay)s;
+}
+QToolButton#foldSubItem {
+    text-align: left;
+    min-height: 42px;
+    max-height: 42px;
+    padding: 0 16px 0 36px;
+    color: %(text_body)s;
+    background: transparent;
+    border: none;
+    border-left: 3px solid transparent;
+    font-size: 14px;
+}
+QToolButton#foldSubItem:hover {
+    background-color: %(hover_overlay)s;
+    color: %(text_title)s;
+}
+QToolButton#foldSubItem:checked {
+    background-color: %(primary)s;
+    color: %(primary_text)s;
+    border-left: 3px solid %(primary_border)s;
+}
+
+/* ---------- 页面标题 ---------- */
+QLabel#pageTitle {
+    color: %(text_title)s;
+    font-size: 18px;
+    font-weight: bold;
+}
+QLabel[level="aux"] {
+    color: %(text_aux)s;
+    font-size: 13px;
+}
+
+/* ---------- 按钮 ---------- */
+QPushButton {
+    background-color: %(bg_card)s;
+    color: %(text_body)s;
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+    padding: 7px 14px;
+}
+QPushButton:hover {
+    border-color: %(primary_border)s;
+}
+QPushButton:disabled {
+    color: %(text_aux)s;
+    background-color: %(bg_sidebar)s;
+}
+QPushButton#btnPrimary {
+    background-color: %(primary)s;
+    border: 1px solid %(primary_border)s;
+    color: %(primary_text)s;
+}
+QPushButton#btnPrimary:hover {
+    background-color: %(primary_border)s;
+}
+QPushButton#btnDanger {
+    background-color: %(bg_card)s;
+    border: 1px solid %(error)s;
+    color: %(error)s;
+}
+QPushButton#btnDanger:hover {
+    background-color: %(error)s;
+    color: #ffffff;
+}
+
+/* ---------- 输入控件 ---------- */
+QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {
+    background-color: %(bg_input)s;
+    color: %(text_body)s;
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+    padding: 6px 8px;
+    selection-background-color: %(primary_border)s;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus,
+QPlainTextEdit:focus, QTextEdit:focus {
+    border: 1px solid %(primary_border)s;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+}
+QComboBox QAbstractItemView {
+    background-color: %(bg_card)s;
+    color: %(text_body)s;
+    border: 1px solid %(border)s;
+    selection-background-color: %(primary)s;
+    selection-color: %(primary_text)s;
+}
+
+/* ---------- 卡片 / 上传区 ---------- */
+QFrame#docCard, QFrame#settingCard, QFrame#pageCard {
+    background-color: %(bg_card)s;
+    border: 1px solid %(border)s;
+    border-radius: 8px;
+}
+QFrame#docCard:hover {
+    border: 1px solid %(primary_border)s;
+}
+QFrame#uploadBox {
+    background-color: %(bg_card)s;
+    border: 2px dashed %(border)s;
+    border-radius: 10px;
+}
+QFrame#uploadBox[dragActive="true"] {
+    border: 2px solid %(primary_border)s;
+    background-color: %(primary)s;
+}
+QLabel#uploadIcon {
+    font-size: 32px;
+    border: none;
+    background: transparent;
+}
+QLabel#cardTitle {
+    font-size: 14px;
+    font-weight: bold;
+    border: none;
+    background: transparent;
+}
+QWidget#tagContainer {
+    background: transparent;
+    border: none;
+}
+
+/* ---------- 表格 ---------- */
+QTableWidget, QTreeWidget {
+    background-color: %(bg_card)s;
+    alternate-background-color: %(bg_alt)s;
+    color: %(text_body)s;
+    border: 1px solid %(border)s;
+    border-radius: 8px;
+    gridline-color: %(border)s;
+    selection-background-color: %(primary)s;
+    selection-color: %(primary_text)s;
+}
+QHeaderView::section {
+    background-color: %(bg_sidebar)s;
+    color: %(text_title)s;
+    border: none;
+    border-right: 1px solid %(border)s;
+    border-bottom: 1px solid %(border)s;
+    padding: 8px 12px;
+    font-weight: bold;
+}
+
+/* ---------- 折叠块 ---------- */
+QFrame#collapseBlock {
+    background-color: %(bg_card)s;
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+}
+QToolButton#collapseHead {
+    text-align: left;
+    background-color: %(bg_sidebar)s;
+    border: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 8px 12px;
+}
+/* 创新点/结论不使用浅蓝高亮底，与普通折叠块保持一致，避免突兀 */
+QFrame#highlightBlock, QLabel#highlightContent {
+    background-color: transparent;
+    color: %(text_body)s;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 8px;
+}
+
+/* ---------- 标签 ---------- */
+QLabel#tagLabel {
+    background-color: %(primary)s;
+    color: %(primary_text)s;
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 12px;
+}
+QLabel#categoryLabel {
+    background-color: %(primary)s;
+    color: %(primary_text)s;
+    border: 1px solid %(primary_border)s;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+/* ---------- 进度条 ---------- */
+QProgressBar {
+    background-color: %(border)s;
+    border: none;
+    border-radius: 3px;
+    height: 8px;
+    text-align: center;
+    color: %(text_aux)s;
+    font-size: 11px;
+}
+QProgressBar::chunk {
+    background-color: %(success)s;
+    border-radius: 3px;
+}
+
+/* ---------- Tab ---------- */
+QTabWidget::pane {
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+    background-color: %(bg_card)s;
+}
+QTabBar::tab {
+    background: transparent;
+    color: %(text_aux)s;
+    padding: 8px 14px;
+    border-bottom: 2px solid transparent;
+}
+QTabBar::tab:selected {
+    color: %(text_title)s;
+    border-bottom: 2px solid %(primary_border)s;
+}
+
+/* ---------- 滚动条 ---------- */
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: %(border)s;
+    border-radius: 5px;
+    min-height: 24px;
+}
+QScrollBar::handle:vertical:hover {
+    background: %(text_aux)s;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+}
+QScrollBar::handle:horizontal {
+    background: %(border)s;
+    border-radius: 5px;
+    min-width: 24px;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0;
+}
+
+/* ---------- 分割器 ---------- */
+QSplitter::handle {
+    background-color: %(border)s;
+}
+QSplitter::handle:horizontal {
+    width: 1px;
+}
+
+/* ---------- 状态文字 ---------- */
+QLabel.statusSuccess { color: %(success)s; }
+QLabel.statusWarn    { color: %(warn)s; }
+QLabel.statusError   { color: %(error)s; }
+
+/* ---------- 弹窗 / Toast / 空状态 ---------- */
+QFrame#modalBox {
+    background-color: %(bg_card)s;
+    border: 1px solid %(border)s;
+    border-radius: 8px;
+}
+QFrame#toastItem {
+    background-color: #222222;
+    border-radius: 6px;
+}
+QLabel#toastText {
+    color: #ffffff;
+    font-size: 13px;
+}
+QFrame#loadingMask {
+    background-color: %(mask_overlay)s;
+    border-radius: 8px;
+}
+QFrame#loadingBox {
+    background-color: %(bg_card)s;
+    border: 1px solid %(border)s;
+    border-radius: 8px;
+}
+QLabel#emptyTitle {
+    color: %(text_aux)s;
+    font-size: 14px;
+}
+QLabel#emptyIcon {
+    font-size: 36px;
+    color: %(text_aux)s;
+}
+
+QCheckBox {
+    color: %(text_body)s;
+    spacing: 6px;
+}
+QToolTip {
+    background-color: %(bg_card)s;
+    color: %(text_body)s;
+    border: 1px solid %(border)s;
+    padding: 4px 8px;
+}
+QSizeGrip {
+    background: transparent;
+}
+
+/* ===== 阶段2：四大核心业务页面补充 ===== */
+QFrame#batchBar {
+    background-color: %(bg_card)s;
+    border: 1px solid %(border)s;
+    border-radius: 8px;
+}
+QFrame#tableWrap {
+    background: transparent;
+    border: none;
+}
+QFrame#docCard[selected="true"] {
+    border: 2px solid %(primary_border)s;
+    background-color: %(primary)s;
+}
+QLabel[rowStatus="success"] { color: %(success)s; }
+QLabel[rowStatus="pending"] { color: %(text_aux)s; }
+QLabel[rowStatus="fail"]    { color: %(error)s; }
+QLabel#blockTitle {
+    color: %(text_title)s;
+    font-size: 14px;
+    font-weight: bold;
+}
+QTextBrowser {
+    background-color: %(bg_input)s;
+    color: %(text_body)s;
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+    padding: 6px 8px;
+    selection-background-color: %(primary_border)s;
+}
+QListWidget {
+    background-color: %(bg_card)s;
+    color: %(text_body)s;
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+    outline: none;
+}
+QListWidget::item {
+    padding: 6px 8px;
+    border-bottom: 1px solid %(border)s;
+}
+QListWidget::item:hover {
+    background-color: %(hover_overlay)s;
+}
+QListWidget::item:selected {
+    background-color: %(primary)s;
+    color: %(primary_text)s;
+}
+QMenu {
+    background-color: %(bg_card)s;
+    color: %(text_body)s;
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+    padding: 4px;
+}
+QMenu::item {
+    padding: 6px 22px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background-color: %(primary)s;
+    color: %(primary_text)s;
+}
+QComboBox:disabled, QPushButton:disabled {
+    color: %(text_aux)s;
+}
+
+/* ---------- 阶段3：管理中心 ---------- */
+QLabel#formError {
+    color: %(error)s;
+    font-size: 12px;
+}
+/* 滚动区视口必须跟随主题，否则深色主题下出现大块白底 */
+QScrollArea {
+    background-color: %(bg_main)s;
+    border: none;
+}
+QScrollArea > QWidget > QWidget {
+    background-color: transparent;
+}
+QWidget#settingScrollContent {
+    background: transparent;
+}
+QTableWidget::item, QTreeWidget::item {
+    padding: 6px 8px;
+}
+QTreeWidget::item:selected {
+    background-color: %(primary)s;
+    color: %(primary_text)s;
+}
+QPushButton#tagCardDel {
+    background: transparent;
+    border: none;
+    color: %(text_aux)s;
+}
+QPushButton#tagCardDel:hover {
+    color: %(error)s;
+}

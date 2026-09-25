@@ -32,3 +32,86 @@
 - 轻量化易用：软件体积小、启动快，适配低配电脑，界面简洁，零基础快速上手
 - 精准高效：智能解析替代人工重复工作，可降低80%以上文献整理耗时
 - 场景适配：针对大学生学习、科研场景定制，适配文、理、工多学科文献整理需求
+
+---
+
+## 快速开始
+
+### 环境依赖
+
+- 操作系统：Windows 10/11（全程本地化，无任何网络请求）
+- Python：3.11（推荐，3.9+ 亦可）
+- 依赖库版本见 `literature_agent/requirements.txt`：
+  PyQt5 5.15.11、pdfplumber 0.11.10、PyPDF2 3.0.1、python-docx 1.2.0、
+  jieba 0.42.1、reportlab 4.2.2、cryptography 50.0.1、pytest 9.1.1
+
+### 安装步骤
+
+```powershell
+# 1. 进入源码目录
+cd literature_agent
+
+# 2.（建议）创建并激活虚拟环境
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# 3. 安装固定版本依赖
+python -m pip install -r requirements.txt
+```
+
+### 启动方式
+
+```powershell
+# 在 literature_agent 目录下执行
+python main.py
+```
+
+首次启动自动在用户目录 `~/.literature_agent/` 下创建 SQLite 数据库（9 张表 +
+种子解析规则/标签/默认配置）与日志，文献与备份的默认存储路径可在
+「管理中心 → 存储路径配置」中自定义并一键迁移。
+
+## 目录结构
+
+```
+literature_agent/
+├── main.py                 # 程序入口：DB 初始化 → 配置 → 主题 → 主窗口
+├── config/                 # 全局常量、主题配色、系统设置读写
+├── ui/                     # 界面展示层：主窗口、通用组件、各功能页面
+│   ├── widgets/            # 按钮、弹窗、Toast、Loading、折叠块、QThread Worker
+│   └── pages/              # 导入/解析/检索/笔记/管理中心子页面
+├── business/               # 业务逻辑层：统一返回 (code, data, msg)
+├── tool_layer/             # 工具层：PDF/TXT/DOCX 提取、jieba 分词、导出、文件工具
+├── data_layer/             # 数据持久层：SQLite 单例连接 + 各表 DAO（全参数化）
+├── utils/                  # 自定义异常、日志、通用工具
+├── resources/              # 图标、QSS 主题、默认模板
+├── output/                 # 运行输出（备份缓存，已 gitignore）
+└── tests/                  # pytest 单元/集成/E2E/边界测试
+```
+
+分层强制约束：UI 层只调用 business 层；business 调 tool/data 层；
+tool 层不碰数据库；data 层只做 CRUD，禁止逆向调用与跨层访问。
+
+## 测试
+
+```powershell
+cd literature_agent
+# 全量测试（业务使用临时内存库，不污染本机数据库）
+python -m pytest tests/ -q
+
+# 单个测试文件
+python -m pytest tests/test_e2e_flow.py -q
+```
+
+测试覆盖：DAO CRUD、导入去重、解析、检索、笔记防抖、标签事务、
+导出/全量+增量备份/恢复、100MB+ 大文件、GBK 编码、加密 PDF、空文件、
+损坏备份 zip、路径穿越、全项目无网络库导入等。
+
+## 快捷键
+
+| 快捷键 | 作用页面 | 功能 |
+|---|---|---|
+| Ctrl+S | 笔记批注 | 立即保存（落库防抖中的笔记） |
+| Ctrl+E | 文献解析 | 按系统默认格式导出当前解析报告 |
+
+关闭程序时自动记住当前页面、管理中心子模块与检索条件，下次启动自动恢复。
+

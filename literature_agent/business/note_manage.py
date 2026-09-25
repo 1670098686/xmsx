@@ -65,8 +65,139 @@ def parse_pdf_anchor(anchor: str):
 
 
 def is_pdf_anchor(anchor: str) -> bool:
-    """判断锚点是否为 PDF 区域批注。"""
-    return parse_pdf_anchor(anchor) is not None
+    """判断锚点是否为 PDF 批注（区域框/高亮/下划线/删除线均算）。"""
+    if not anchor:
+        return False
+    text = str(anchor)
+    return text.startswith((
+        C.NOTE_PDF_ANCHOR_PREFIX,
+        C.NOTE_PDF_HIGHLIGHT_PREFIX,
+        C.NOTE_PDF_UNDERLINE_PREFIX,
+        C.NOTE_PDF_STRIKEOUT_PREFIX,
+    ))
+
+
+def encode_pdf_mark_anchor(kind: str, page_index, word_start, word_end) -> str:
+    """将 PDF 文字标记编码为词区间锚点。
+
+    Args:
+        kind: 标记类型（highlight/underline/strikeout）。
+        page_index: 页码序号（从 0 开始）。
+        word_start: 起始词序号（PyMuPDF get_text("words") 顺序，含）。
+        word_end: 结束词序号（含）。
+    Returns:
+        锚点字符串，如 "pdfh:2:12-38"。
+    Raises:
+        ValueError: 类型/页码/词区间非法。
+    """
+    prefix = C.PDF_MARK_PREFIXES.get(kind)
+    if not prefix:
+        raise ValueError("非法的 PDF 文字标记类型")
+    try:
+        page_index = int(page_index)
+        word_start = int(word_start)
+        word_end = int(word_end)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("PDF 标记锚点参数非法") from exc
+    if page_index < 0 or word_start < 0 or word_end < word_start:
+        raise ValueError("PDF 标记锚点页码或词区间非法")
+    return f"{prefix}{page_index}:{word_start}-{word_end}"
+
+
+def parse_pdf_mark_anchor(anchor: str):
+    """解析 PDF 文字标记词区间锚点。
+
+    Returns:
+        (kind, page_index, word_start, word_end)；非此类锚点返回 None。
+    """
+    if not anchor:
+        return None
+    text = str(anchor)
+    for kind, prefix in C.PDF_MARK_PREFIXES.items():
+        if not text.startswith(prefix):
+            continue
+        body = text[len(prefix):]
+        try:
+            page_text, span_text = body.split(":", 1)
+            start_text, end_text = span_text.split("-", 1)
+            page_index = int(page_text)
+            word_start = int(start_text)
+            word_end = int(end_text)
+        except (ValueError, TypeError):
+            return None
+        if page_index < 0 or word_start < 0 or word_end < word_start:
+            return None
+        return kind, page_index, word_start, word_end
+    return None
+
+
+def parse_pdf_note_anchor(anchor: str):
+    """统一解析任意 PDF 批注锚点。
+
+    Returns:
+        dict: {"kind", "page", "rect", "span"}，rect/span 互斥为 None；
+              非 PDF 锚点返回 None。
+    """
+    boxed = parse_pdf_anchor(anchor)
+    if boxed:
+        return {"kind": C.MARK_KIND_BOX, "page": boxed[0],
+                "rect": boxed[1], "span": None}
+    marked = parse_pdf_mark_anchor(anchor)
+    if marked:
+        kind, page, start, end = marked
+        return {"kind": kind, "page": page, "rect": None,
+                "span": (start, end)}
+    return None
+
+
+def encode_text_anchor(kind: str, start, end) -> str:
+    """将 TXT 字符区间标记编码为锚点。
+
+    Args:
+        kind: 标记类型（comment/highlight/underline/strikeout）。
+        start: 起始字符位置（渲染全文中的偏移，含）。
+        end: 结束字符位置（不含，必须大于 start）。
+    Returns:
+        锚点字符串，如 "txh:120-186"。
+    Raises:
+        ValueError: 类型或区间非法。
+    """
+    prefix = C.TEXT_MARK_PREFIXES.get(kind)
+    if not prefix:
+        raise ValueError("非法的文字标记类型")
+    try:
+        start = int(start)
+        end = int(end)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("文字标记锚点参数非法") from exc
+    if start < 0 or end <= start:
+        raise ValueError("文字标记锚点字符区间非法")
+    return f"{prefix}{start}-{end}"
+
+
+def parse_text_anchor(anchor: str):
+    """解析 TXT 字符区间锚点。
+
+    Returns:
+        (kind, start, end)；非此类锚点返回 None。
+    """
+    if not anchor:
+        return None
+    text = str(anchor)
+    for kind, prefix in C.TEXT_MARK_PREFIXES.items():
+        if not text.startswith(prefix):
+            continue
+        body = text[len(prefix):]
+        try:
+            start_text, end_text = body.split("-", 1)
+            start = int(start_text)
+            end = int(end_text)
+        except (ValueError, TypeError):
+            return None
+        if start < 0 or end <= start:
+            return None
+        return kind, start, end
+    return None
 
 
 class NoteManageService:
@@ -148,6 +279,98 @@ class NoteManageService:
                 lit_id,
             )
             return C.CODE_SUCCESS, note, "已保存"
+        except ValueError as exc:
+            return C.CODE_FILE_INVALID, None, str(exc)
+        except Exception as exc:
+            return exception_to_code(exc), None, getattr(exc, "message", str(exc))
+
+    @staticmethod
+    def _resolve_mark_color(kind: str, highlight_style: str) -> str:
+        """标记未指定颜色时按类型补默认色（高亮黄、划线红）。"""
+        style = (highlight_style or "").strip()
+        if style:
+            return style
+        if kind == C.MARK_KIND_HIGHLIGHT:
+            return C.NOTE_DEFAULT_MARK_COLOR
+        return C.NOTE_DEFAULT_LINE_COLOR
+
+    def add_pdf_markup(self, lit_id: int, kind: str, page_index: int,
+                       word_start: int, word_end: int, content: str = "",
+                       highlight_style: str = "") -> tuple:
+        """添加 PDF 文字标记（高亮/下划线/删除线），可选附批注文字。
+
+        纯划线标记允许内容为空；批注文字后续可通过 update_note 补写。
+
+        Args:
+            lit_id: 文献 id。
+            kind: highlight/underline/strikeout。
+            page_index: 页码序号（从 0 开始）。
+            word_start/word_end: 选中词序号区间（均含）。
+            content: 可选批注文字。
+            highlight_style: 颜色十六进制值；空则按类型取默认色。
+        Returns:
+            (code, note_dict, msg)
+        """
+        try:
+            if not self.lit_dao.select_by_id(lit_id):
+                return C.CODE_FILE_NOT_FOUND, None, "文献不存在"
+            if kind not in C.PDF_MARK_PREFIXES:
+                return C.CODE_FILE_INVALID, None, "非法的文字标记类型"
+            anchor = encode_pdf_mark_anchor(
+                kind, page_index, word_start, word_end)
+            note_id = self.note_dao.insert({
+                "literature_id": lit_id,
+                "paragraph_pos": anchor,
+                "note_content": (content or "").strip(),
+                "note_type": C.NOTE_TYPE_PARAGRAPH,
+                "highlight_style": self._resolve_mark_color(kind, highlight_style),
+            })
+            note = self.note_dao.get_by_id(note_id)
+            write_operation_log(
+                C.OP_NOTE,
+                f"新增 PDF {kind} 标记：文献 {lit_id} 第 {page_index + 1} 页",
+                lit_id,
+            )
+            return C.CODE_SUCCESS, note, "已添加标记"
+        except ValueError as exc:
+            return C.CODE_FILE_INVALID, None, str(exc)
+        except Exception as exc:
+            return exception_to_code(exc), None, getattr(exc, "message", str(exc))
+
+    def add_text_mark(self, lit_id: int, kind: str, start: int, end: int,
+                      content: str = "", highlight_style: str = "") -> tuple:
+        """添加 TXT 文字区间标记（选中批注/高亮/下划线/删除线）。
+
+        选中批注（comment）必须有批注文字；纯划线标记允许内容为空。
+
+        Args:
+            lit_id: 文献 id。
+            kind: comment/highlight/underline/strikeout。
+            start/end: 渲染全文中的字符区间（含 start，不含 end）。
+            content: comment 类型必填，其余可选。
+            highlight_style: 颜色十六进制值；空则按类型取默认色。
+        Returns:
+            (code, note_dict, msg)
+        """
+        try:
+            if not self.lit_dao.select_by_id(lit_id):
+                return C.CODE_FILE_NOT_FOUND, None, "文献不存在"
+            if kind not in C.TEXT_MARK_PREFIXES:
+                return C.CODE_FILE_INVALID, None, "非法的文字标记类型"
+            if kind == C.MARK_KIND_COMMENT and not (content or "").strip():
+                return C.CODE_FILE_INVALID, None, "批注内容不能为空"
+            anchor = encode_text_anchor(kind, start, end)
+            note_id = self.note_dao.insert({
+                "literature_id": lit_id,
+                "paragraph_pos": anchor,
+                "note_content": (content or "").strip(),
+                "note_type": C.NOTE_TYPE_PARAGRAPH,
+                "highlight_style": self._resolve_mark_color(kind, highlight_style),
+            })
+            note = self.note_dao.get_by_id(note_id)
+            write_operation_log(
+                C.OP_NOTE, f"新增文本 {kind} 标记：文献 {lit_id}", lit_id)
+            return C.CODE_SUCCESS, note, "已添加标记"
         except ValueError as exc:
             return C.CODE_FILE_INVALID, None, str(exc)
         except Exception as exc:

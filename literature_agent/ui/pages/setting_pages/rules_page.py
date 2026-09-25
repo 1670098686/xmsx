@@ -1,11 +1,13 @@
-"""管理中心 - 解析规则配置页：模板切换、六维度开关、解析精度、默认规则管理。"""
+"""管理中心 - 解析规则配置页：模板切换、学科编辑、维度开关、解析精度、默认规则管理。"""
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QSpinBox,
+    QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QWidget,
 )
 
+from business.literature_parse import LiteratureParseService
 from business.parse_rule_service import (
-    DEFAULT_KEYWORD_TOP_N, DIMENSION_KEYS, ParseRuleService,
+    SUBJECT_TYPE_MAX_LENGTH, DIMENSION_KEYS, ParseRuleService,
 )
 from ui.pages.setting_pages import build_scroll_content, build_section_card
 from ui.widgets.buttons import DangerButton, GhostButton, PrimaryButton
@@ -23,12 +25,19 @@ _PRECISION_HINTS = {
 
 
 class SettingRulesPage(QWidget):
-    """解析规则配置子页面。"""
+    """解析规则配置子页面。
+
+    Signals:
+        reparse_requested(): 用户保存默认规则后确认“立即重新解析全部已解析文献”。
+    """
+
+    reparse_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         """初始化解析规则配置子页面。"""
         super().__init__(parent)
         self._service = ParseRuleService()
+        self._parse_service = LiteratureParseService()
         self._loading = False
         self._dim_checks = {}
         self._build_ui()
@@ -54,8 +63,10 @@ class SettingRulesPage(QWidget):
 
         form = QFormLayout()
         form.setSpacing(8)
-        self.lbl_subject = QLabel("-")
-        form.addRow("适用学科：", self.lbl_subject)
+        self.edit_subject = QLineEdit()
+        self.edit_subject.setMaxLength(SUBJECT_TYPE_MAX_LENGTH)
+        self.edit_subject.setPlaceholderText("填写适用学科，如：医学 / 计算机 / 经济学")
+        form.addRow("适用学科：", self.edit_subject)
 
         dim_frame = QFrame()
         dim_row = QHBoxLayout(dim_frame)
@@ -80,10 +91,6 @@ class SettingRulesPage(QWidget):
         prec_row.addStretch(1)
         form.addRow("解析精度：", prec_row)
 
-        self.spin_keyword = QSpinBox()
-        self.spin_keyword.setRange(5, 100)
-        self.spin_keyword.setValue(DEFAULT_KEYWORD_TOP_N)
-        form.addRow("关键词数量：", self.spin_keyword)
         layout.addLayout(form)
         content_layout.addWidget(card)
 
@@ -148,18 +155,23 @@ class SettingRulesPage(QWidget):
             self._load_detail(rule_id)
 
     def _load_detail(self, rule_id: int) -> None:
-        """把规则详情填入维度/精度/关键词控件。"""
+        """把规则详情填入学科/维度/精度控件。"""
         detail = self._service.get_rule_detail(rule_id)
         if not detail:
             return
-        self.lbl_subject.setText(detail.get("subject_type") or "-")
+        is_builtin = self._service.is_builtin_rule(rule_id)
+        self.edit_subject.setText(detail.get("subject_type") or "")
+        # 预设模板学科只读；自定义模板可编辑
+        self.edit_subject.setEnabled(not is_builtin)
+        self.edit_subject.setToolTip(
+            "预设模板的适用学科不可修改，可点击「另存为新规则」创建自定义模板"
+            if is_builtin else "自定义模板：可填写适用学科，最多 20 个字"
+        )
         for key, check in self._dim_checks.items():
             check.setChecked(bool(detail["dimensions"].get(key, True)))
         precision = int(detail.get("precision_level", 3))
         index = self.combo_precision.findData(precision)
         self.combo_precision.setCurrentIndex(max(index, 0))
-        self.spin_keyword.setValue(int(detail.get("keyword_top_n",
-                                                  DEFAULT_KEYWORD_TOP_N)))
         is_default = int(detail.get("is_default", 0)) == 1
         self.btn_delete.setEnabled(not is_default)
         self.btn_set_default.setEnabled(not is_default)
@@ -182,30 +194,66 @@ class SettingRulesPage(QWidget):
         return self.combo_rules.currentData()
 
     def _save_current(self) -> None:
-        """保存对当前规则维度/精度/关键词的修改。"""
+        """保存对当前规则维度/精度/学科的修改。"""
         rule_id = self._current_rule_id()
         if rule_id is None:
             show_toast("请先选择规则", level="warn")
             return
+        is_builtin = self._service.is_builtin_rule(rule_id)
+        subject_type = None
+        if not is_builtin:
+            subject_type = self.edit_subject.text().strip()
+            if not subject_type:
+                show_toast("请填写适用学科", level="warn")
+                self.edit_subject.setFocus()
+                return
         code, _data, msg = self._service.update_rule_detail(
             rule_id,
             dimensions=self._collect_dimensions(),
-            keyword_top_n=self.spin_keyword.value(),
             precision=self.combo_precision.currentData(),
+            subject_type=subject_type,
         )
         show_toast(msg, level="success" if code == 0 else "error")
+        if code == 0:
+            self._prompt_reparse_default(rule_id)
+
+    def _prompt_reparse_default(self, rule_id: int) -> None:
+        """修改的是默认规则时，询问是否立即按新规则重新解析全部已解析文献。
+
+        Args:
+            rule_id: 刚保存的规则 id。
+        """
+        if rule_id != self._service.get_default_rule_id():
+            return
+        parsed_ids = self._parse_service.list_parsed_lit_ids()
+        if not parsed_ids:
+            return
+        if ConfirmDialog.confirm(
+            self, "应用到已有解析结果",
+            f"默认规则已更新。库中已有 {len(parsed_ids)} 篇文献的解析报告，"
+            "是否立即按新规则重新解析？\n"
+            "（选“否”也可稍后在文献解析页逐篇点击「重新解析」）",
+            confirm_text="立即重新解析",
+        ):
+            self.reparse_requested.emit()
 
     def _save_as_new(self) -> None:
-        """把当前维度配置另存为一条自定义新规则。"""
+        """把当前维度配置另存为一条自定义新规则（名称 + 适用学科）。"""
         name = InputDialog.prompt(
             self, "另存为新规则", "规则名称：", placeholder="例如：医学文献精细规则"
         )
         if not name:
             return
+        subject = InputDialog.prompt(
+            self, "另存为新规则", "适用学科：",
+            default_text=self.edit_subject.text().strip() or "自定义",
+            placeholder="如：医学 / 计算机 / 经济学，最多 20 字",
+        )
+        if not subject:
+            return
         code, _rule_id, msg = self._service.create_rule(
-            name, "自定义", self._collect_dimensions(),
+            name, subject, self._collect_dimensions(),
             precision=self.combo_precision.currentData(),
-            keyword_top_n=self.spin_keyword.value(),
         )
         if code == 0:
             show_toast(msg, level="success")

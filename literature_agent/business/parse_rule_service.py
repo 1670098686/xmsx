@@ -1,5 +1,6 @@
 """解析规则配置业务：规则 CRUD、rule_detail JSON 读写、默认规则管理。"""
 import json
+from datetime import datetime, timezone
 
 from config import constants as C
 from data_layer.dao.config_dao import SystemConfigDao
@@ -32,8 +33,11 @@ DEFAULT_WEIGHTS = {
     "research_conclusion": 1.5,
     "reference_list": 1.0,
 }
-DEFAULT_KEYWORD_TOP_N = 20
 _PRECISION_MIN, _PRECISION_MAX = 1, 5
+# 内置预设规则 id（db_init 种子数据，适用学科等内置属性只读）
+BUILTIN_RULE_IDS = (1, 2, 3, 4)
+# 适用学科字段最大长度（与 parse_rule.subject_type VARCHAR(20) 对齐）
+SUBJECT_TYPE_MAX_LENGTH = 20
 
 
 class ParseRuleService:
@@ -58,7 +62,7 @@ class ParseRuleService:
 
         Returns:
             {id, rule_name, subject_type, precision_level, is_default,
-             dimensions, weights, keyword_top_n}；规则不存在返回 None。
+             dimensions, weights}；规则不存在返回 None。
         """
         rule = self.rule_dao.get_by_id(rule_id)
         if not rule:
@@ -80,8 +84,6 @@ class ParseRuleService:
             "is_default": int(rule.get("is_default", 0)),
             "dimensions": dimensions,
             "weights": weights,
-            "keyword_top_n": int(detail.get("keyword_top_n",
-                                            DEFAULT_KEYWORD_TOP_N)),
         }
 
     def get_default_rule_id(self) -> int:
@@ -92,12 +94,25 @@ class ParseRuleService:
         configured = self.config_dao.get(C.CFG_PARSE_DEFAULT_RULE, "1")
         return int(configured or 1)
 
+    @staticmethod
+    def is_builtin_rule(rule_id: int) -> bool:
+        """判断规则是否为内置预设模板（预设模板的适用学科只读）。
+
+        Args:
+            rule_id: 规则 id。
+        Returns:
+            True 表示 db_init 写入的内置预设规则。
+        """
+        try:
+            return int(rule_id) in BUILTIN_RULE_IDS
+        except (TypeError, ValueError):
+            return False
+
     # ================= 新增 / 修改 =================
 
     def create_rule(self, rule_name: str, subject_type: str,
                     dimensions: dict, weights: dict = None,
-                    precision: int = 3,
-                    keyword_top_n: int = DEFAULT_KEYWORD_TOP_N) -> tuple:
+                    precision: int = 3) -> tuple:
         """创建自定义规则。
 
         Args:
@@ -106,7 +121,6 @@ class ParseRuleService:
             dimensions: {维度key: bool}。
             weights: {维度key: float}，缺省用默认权重。
             precision: 解析精度 1-5。
-            keyword_top_n: 关键词提取数量。
         Returns:
             (code, rule_id, msg)
         """
@@ -115,12 +129,16 @@ class ParseRuleService:
             return C.CODE_FILE_INVALID, None, "规则名称不能为空"
         if any(r["rule_name"] == rule_name for r in self.rule_dao.list_all()):
             return C.CODE_DUPLICATE, None, "已存在同名规则"
+        subject_type = (subject_type or "").strip() or "自定义"
+        if len(subject_type) > SUBJECT_TYPE_MAX_LENGTH:
+            return C.CODE_FILE_INVALID, None, \
+                f"适用学科不能超过 {SUBJECT_TYPE_MAX_LENGTH} 个字"
         precision = self._clamp_precision(precision)
-        detail = self._build_detail(dimensions, weights, keyword_top_n)
+        detail = self._build_detail(dimensions, weights)
         try:
             rule_id = self.rule_dao.insert({
                 "rule_name": rule_name,
-                "subject_type": subject_type or "自定义",
+                "subject_type": subject_type,
                 "rule_detail": json.dumps(detail, ensure_ascii=False),
                 "precision_level": precision,
                 "is_default": 0,
@@ -132,16 +150,43 @@ class ParseRuleService:
 
     def update_rule_detail(self, rule_id: int, dimensions: dict = None,
                            weights: dict = None,
-                           keyword_top_n: int = None,
-                           precision: int = None) -> tuple:
-        """更新规则维度/权重/关键词数/精度（JSON 合并写回）。"""
+                           precision: int = None,
+                           subject_type: str = None) -> tuple:
+        """更新规则维度/权重/精度/适用学科（JSON 合并写回）。
+
+        内置预设规则的适用学科只读；自定义规则可自由编辑学科。
+        修改的是当前默认规则时同步刷新规则版本时间戳，供解析页提示
+        旧报告按新规则重新解析。历史版本 rule_detail 中残留的
+        keyword_top_n 字段会在保存时自动清除。
+
+        Args:
+            rule_id: 规则 id。
+            dimensions: 维度开关字典，None 表示不修改。
+            weights: 维度权重字典，None 表示不修改。
+            precision: 解析精度 1-5，None 表示不修改。
+            subject_type: 适用学科，None 表示不修改。
+        Returns:
+            (code, None, msg)
+        """
         rule = self.rule_dao.get_by_id(rule_id)
         if not rule:
             return C.CODE_FILE_NOT_FOUND, None, "规则不存在"
+        if subject_type is not None:
+            if self.is_builtin_rule(rule_id):
+                return C.CODE_FILE_INVALID, None, \
+                    "预设模板的适用学科不可修改，可另存为新规则后自定义"
+            subject_type = subject_type.strip()
+            if not subject_type:
+                return C.CODE_FILE_INVALID, None, "适用学科不能为空"
+            if len(subject_type) > SUBJECT_TYPE_MAX_LENGTH:
+                return C.CODE_FILE_INVALID, None, \
+                    f"适用学科不能超过 {SUBJECT_TYPE_MAX_LENGTH} 个字"
         try:
             detail = json.loads(rule.get("rule_detail") or "{}")
         except (TypeError, ValueError):
             detail = {}
+        # 兼容清理：旧版本写入的关键词数量字段已废弃，保存时移除
+        detail.pop("keyword_top_n", None)
         if dimensions is not None:
             detail["dimensions"] = {
                 key: bool(dimensions.get(key, True)) for key in DIMENSION_KEYS
@@ -153,21 +198,30 @@ class ParseRuleService:
                 if key in DIMENSION_KEYS
             })
             detail["weights"] = merged
-        if keyword_top_n is not None:
-            detail["keyword_top_n"] = max(1, int(keyword_top_n))
         detail.setdefault("dimensions", {key: True for key in DIMENSION_KEYS})
         detail.setdefault("weights", dict(DEFAULT_WEIGHTS))
-        detail.setdefault("keyword_top_n", DEFAULT_KEYWORD_TOP_N)
 
         fields = {"rule_detail": json.dumps(detail, ensure_ascii=False)}
         if precision is not None:
             fields["precision_level"] = self._clamp_precision(precision)
+        if subject_type is not None:
+            fields["subject_type"] = subject_type
         try:
             self.rule_dao.update_by_id(rule_id, fields)
             write_operation_log(C.OP_CONFIG, f"更新解析规则：{rule['rule_name']}")
+            if int(rule_id) == self.get_default_rule_id():
+                self.bump_default_rule_version()
             return C.CODE_SUCCESS, None, "规则已保存"
         except Exception as exc:
             return exception_to_code(exc), None, getattr(exc, "message", str(exc))
+
+    def bump_default_rule_version(self) -> None:
+        """把默认规则版本时间戳刷新为当前 UTC 时间（修改默认规则后调用）。
+
+        解析页据此判断已有报告是否早于最新规则、需要重新解析。
+        """
+        now_text = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        self.config_dao.set(C.CFG_PARSE_RULE_VERSION, now_text)
 
     def rename_rule(self, rule_id: int, new_name: str) -> tuple:
         """重命名规则。"""
@@ -201,6 +255,7 @@ class ParseRuleService:
                     C.CFG_PRECISION_DEFAULT,
                     str(rule.get("precision_level", 3)),
                 )
+            self.bump_default_rule_version()
             write_operation_log(C.OP_CONFIG, f"设置默认解析规则：{rule['rule_name']}")
             return C.CODE_SUCCESS, None, "已设为默认规则"
         except Exception as exc:
@@ -227,7 +282,7 @@ class ParseRuleService:
         if not rule:
             return C.CODE_FILE_NOT_FOUND, None, "规则不存在"
         detail = self._build_detail(
-            {key: True for key in DIMENSION_KEYS}, None, DEFAULT_KEYWORD_TOP_N
+            {key: True for key in DIMENSION_KEYS}, None
         )
         try:
             self.rule_dao.update_by_id(rule_id, {
@@ -235,6 +290,8 @@ class ParseRuleService:
                 "precision_level": 3,
             })
             write_operation_log(C.OP_CONFIG, f"重置解析规则：{rule['rule_name']}")
+            if int(rule_id) == self.get_default_rule_id():
+                self.bump_default_rule_version()
             return C.CODE_SUCCESS, None, "已重置为默认配置"
         except Exception as exc:
             return exception_to_code(exc), None, getattr(exc, "message", str(exc))
@@ -256,9 +313,8 @@ class ParseRuleService:
         return max(_PRECISION_MIN, min(_PRECISION_MAX, value))
 
     @staticmethod
-    def _build_detail(dimensions: dict, weights: dict,
-                      keyword_top_n: int) -> dict:
-        """组装写入 rule_detail 的 JSON 结构。"""
+    def _build_detail(dimensions: dict, weights: dict) -> dict:
+        """组装写入 rule_detail 的 JSON 结构（仅维度开关与权重）。"""
         dims = {
             key: bool((dimensions or {}).get(key, True))
             for key in DIMENSION_KEYS
@@ -272,5 +328,4 @@ class ParseRuleService:
         return {
             "dimensions": dims,
             "weights": merged_weights,
-            "keyword_top_n": max(1, int(keyword_top_n or DEFAULT_KEYWORD_TOP_N)),
         }

@@ -80,25 +80,29 @@ class LiteratureParseService:
                 self.lit_dao.update_by_id(lit_id, {"is_parsed": C.PARSE_IN_PROGRESS})
 
             # 优先 AI 原件直传解析；未配置模型或调用失败时回退本地解析
-            ai_result = self._try_ai_parse(lit, rule_detail, active_rule_id, emit)
+            precision = int(rule.get("precision_level", 3))
+            ai_result = self._try_ai_parse(
+                lit, rule_detail, active_rule_id, precision, emit
+            )
             if ai_result is not None:
-                report, keywords, used_ai = ai_result
+                report, keywords = ai_result
+                used_ai = True
             else:
                 used_ai = False
                 emit(15, "提取文献原文")
                 text = self._extract_lit_text(lit)
 
-                emit(45, "识别文献结构")
-                structure = text_analysis.detect_structure(text)
+                emit(55, "识别文献结构并整合成段语句")
+                structure = text_analysis.detect_structure(text, precision)
 
-                emit(70, "提取关键词")
-                top_n = int(rule_detail.get("keyword_top_n", 20))
+                emit(75, "提取关键词")
                 keywords = [
-                    word for word, _weight in text_analysis.extract_keywords(text, top_n)
+                    word for word, _weight
+                    in text_analysis.extract_keywords(text, C.PARSE_KEYWORD_TOP_N)
                 ]
 
                 emit(85, "生成结构化报告")
-                report = self._build_report(lit, structure, keywords,
+                report = self._build_report(lit, structure,
                                             rule_detail, active_rule_id)
 
             emit(95, "写入解析报告")
@@ -181,6 +185,35 @@ class LiteratureParseService:
         if not saved:
             return None
         return self._compose_report_view(lit, saved, [])
+
+    def list_parsed_lit_ids(self) -> list:
+        """返回已完成解析的文献 id 列表（规则更新后批量重解析用）。"""
+        return [
+            lit["id"] for lit in self.lit_dao.select_all()
+            if lit.get("is_parsed") == C.PARSE_DONE
+        ]
+
+    def is_report_stale(self, lit_id: int) -> bool:
+        """判断某文献的解析报告是否早于默认规则的最近修改时间。
+
+        Args:
+            lit_id: 文献 id。
+        Returns:
+            True 表示默认规则模板更新于报告生成之后，建议重新解析；
+            无报告、未记录规则版本或时间戳异常时返回 False。
+        """
+        version = SystemConfigDao().get(C.CFG_PARSE_RULE_VERSION, "")
+        if not version:
+            return False
+        report = self.report_dao.get_by_lit_id(lit_id)
+        if not report or not report.get("parse_time"):
+            return False
+        try:
+            # parse_time 与规则版本均为 UTC "YYYY-MM-DD HH:MM:SS" 定长文本，可按字典序比较
+            return str(report["parse_time"]).strip() < str(version).strip()
+        except Exception:
+            logger.warning("报告/规则时间戳比较失败：lit_id=%s", lit_id)
+            return False
 
     def preview_text(self, lit_id: int) -> tuple:
         """提取文献原文供阅读区展示（UI 禁止直接调用 tool_layer）。
@@ -307,7 +340,8 @@ class LiteratureParseService:
         except (TypeError, ValueError):
             detail = {}
         detail.setdefault("dimensions", {})
-        detail.setdefault("keyword_top_n", 20)
+        # 兼容清理：忽略历史规则中残留的关键词数量配置（该能力已下线）
+        detail.pop("keyword_top_n", None)
         return rule, detail
 
     def _extract_lit_text(self, lit: dict) -> str:
@@ -323,7 +357,7 @@ class LiteratureParseService:
     # ================= AI 原件直传解析 =================
 
     def _try_ai_parse(self, lit: dict, rule_detail: dict, rule_id: int,
-                      emit) -> tuple:
+                      precision: int, emit):
         """尝试将文献原件直传当前 AI 模型解析。
 
         原件（PDF/Word/TXT 二进制文件）整体上传给模型，由模型直接阅读，
@@ -334,9 +368,11 @@ class LiteratureParseService:
             lit: 文献记录字典。
             rule_detail: 解析规则详情（维度开关等）。
             rule_id: 生效规则 id。
+            precision: 解析精度 1-5。
             emit: 进度回调 emit(percent, message)。
         Returns:
-            (report_dict, keywords_list, True) 或 None（未走 AI）。
+            (report_dict, keywords_list)：各维度均为成段完整语句，
+            keywords 为附加关键词列表；未走 AI 时返回 None。
         """
         model = SystemService().get_current_ai_model(decrypt=True)
         if not model or not model.get("base_url") or not model.get("api_key"):
@@ -355,7 +391,7 @@ class LiteratureParseService:
             )
 
             emit(55, "AI 正在阅读原件并生成结构化报告")
-            prompt = self._build_ai_prompt(rule_detail)
+            prompt = self._build_ai_prompt(rule_detail, int(precision))
             content = ai_client.chat_with_file(
                 model["base_url"], model["api_key"], model["name"],
                 file_id, prompt, _AI_SYSTEM_PROMPT,
@@ -363,21 +399,26 @@ class LiteratureParseService:
             data = ai_client.extract_json_block(content)
 
             emit(85, "整理 AI 解析结果")
-            top_n = int(rule_detail.get("keyword_top_n", 20))
             raw_keywords = data.get("keywords") or []
             if isinstance(raw_keywords, str):
-                raw_keywords = [k.strip() for k in raw_keywords.replace("，", ",").split(",")]
-            keywords = [str(k).strip() for k in raw_keywords if str(k).strip()][:top_n]
+                raw_keywords = [
+                    k.strip() for k in raw_keywords.replace("，", ",").split(",")
+                ]
+            keywords = [
+                str(k).strip() for k in raw_keywords if str(k).strip()
+            ][:C.PARSE_KEYWORD_TOP_N]
 
             dimensions = rule_detail.get("dimensions", {})
             report = {"literature_id": lit["id"], "rule_id": rule_id}
             for field in _DIMENSION_FIELDS:
                 if dimensions.get(field, True):
                     value = data.get(field, "")
-                    report[field] = value.strip() if isinstance(value, str) else str(value)
+                    raw = value.strip() if isinstance(value, str) else str(value).strip()
+                    # 与本地解析同一出口：合并硬换行、整理为成段语句/逐条文献
+                    report[field] = text_analysis.normalize_section_text(field, raw)
                 else:
                     report[field] = ""
-            return report, keywords, True
+            return report, keywords
         except AIServiceError as exc:
             logger.warning("AI 原件解析失败，回退本地解析：%s", exc.message)
             write_operation_log(
@@ -388,26 +429,49 @@ class LiteratureParseService:
             return None
 
     @staticmethod
-    def _build_ai_prompt(rule_detail: dict) -> str:
-        """按启用维度构造 AI 解析指令（要求严格 JSON 输出）。"""
+    def _build_ai_prompt(rule_detail: dict, precision: int = 3) -> str:
+        """按启用维度与解析精度构造 AI 解析指令（要求严格 JSON 输出）。
+
+        六个内容维度一律要求输出完整陈述句组成的段落，禁止以短语/要点
+        罗列替代语句；关键词只允许出现在独立的 keywords 附加字段中；
+        参考文献维度例外，按原件逐条列出。
+
+        Args:
+            rule_detail: 规则明细（维度开关等）。
+            precision: 解析精度 1-5，低档求快、高档求详尽。
+        Returns:
+            拼装完成的提示词字符串。
+        """
         dimensions = rule_detail.get("dimensions", {})
         field_specs = {
-            "research_background": "研究背景：概括选题背景与要解决的问题，150-300字",
-            "core_view": "核心观点：提炼作者的主要论点与结论，150-300字",
-            "research_method": "研究方法：说明采用的研究/分析方法，100-200字",
-            "innovation_point": "创新点：归纳文章的创新之处，100-200字",
-            "research_conclusion": "研究结论：总结最终结论与建议，150-300字",
-            "reference_list": "参考文献：按原件文末列出，多条之间用换行分隔",
+            "research_background": "研究背景：用完整语句陈述选题背景与要解决的问题，150-300字",
+            "core_view": "核心观点：用完整语句陈述作者的主要论点与依据，150-300字",
+            "research_method": "研究方法：用完整语句说明采用的研究/分析方法与过程，100-200字",
+            "innovation_point": "创新点：用完整语句陈述文章的创新之处，100-200字",
+            "research_conclusion": "研究结论：用完整语句总结最终结论与建议，150-300字",
+            "reference_list": "参考文献：按原件文末原样逐条列出，每条单独一行",
+        }
+        precision_guides = {
+            1: "解析精度要求：最快档，每项用 1-2 句完整句子概括最核心内容。",
+            2: "解析精度要求：快速档，每项用 2-4 句完整句子简明陈述。",
+            3: "解析精度要求：均衡档，按各项标注字数用完整句子成段作答。",
+            4: "解析精度要求：精细档，在忠于原件的前提下用完整句子展开，每项 300-400 字。",
+            5: "解析精度要求：最精细档，用完整句子全面覆盖论证细节与数据，每项 400-600 字。",
         }
         lines = [
             "请直接阅读我上传的文献原始文件全文，依据原件内容完成结构化解析。要求：",
+            precision_guides.get(precision, precision_guides[3]),
+            "除参考文献与 keywords 外，每个维度字段都必须是一段或多段意思"
+            "完整的陈述句（句子主谓宾完整、句末使用句号），严禁用短语、"
+            "词组罗列或编号要点清单代替完整句子。",
         ]
         for field in _DIMENSION_FIELDS:
             if dimensions.get(field, True):
                 lines.append(f'- "{field}": {field_specs[field]}')
             else:
                 lines.append(f'- "{field}": 该维度未启用，填空字符串 ""')
-        lines.append('- "keywords": 从原件中提炼的 5-15 个关键词，字符串数组')
+        lines.append('- "keywords": 附加信息，从原件中提炼 5-15 个关键词的字符串数组，'
+                     '该字段独立存在，不得用它替代上面任何维度的语句段落')
         lines.append("所有内容必须使用与原件一致的语言；未在原件中出现的信息不要编造。")
         lines.append("只输出 JSON 对象，示例："
                      '{"research_background":"...","core_view":"...",'
@@ -417,9 +481,9 @@ class LiteratureParseService:
         return "\n".join(lines)
 
     @staticmethod
-    def _build_report(lit: dict, structure: dict, keywords: list,
+    def _build_report(lit: dict, structure: dict,
                       rule_detail: dict, rule_id: int) -> dict:
-        """按规则维度开关组装报告字段。"""
+        """按规则维度开关组装报告字段（各维度均为成段完整语句）。"""
         dimensions = rule_detail.get("dimensions", {})
         report = {"literature_id": lit["id"], "rule_id": rule_id}
         for field in _DIMENSION_FIELDS:
@@ -444,8 +508,13 @@ class LiteratureParseService:
             logger.error("回写解析失败状态异常：%s", exc)
 
     @staticmethod
-    def _compose_report_view(lit: dict, saved_report: dict, keywords: list) -> dict:
-        """合并文献元信息 + 报告字段 + 关键词，供 UI 直接渲染。"""
+    def _compose_report_view(lit: dict, saved_report: dict,
+                             keywords: list = None) -> dict:
+        """合并文献元信息、报告维度字段与附加关键词，供 UI 直接渲染。
+
+        关键词仅作附加信息（不入库、不参与维度内容），因此读取历史报告
+        时传入空列表。
+        """
         view = dict(saved_report or {})
         view.update({
             "literature_id": lit["id"],
@@ -454,6 +523,6 @@ class LiteratureParseService:
             "publish_time": lit.get("publish_time", ""),
             "journal_source": lit.get("journal_source", ""),
             "literature_type": lit.get("literature_type", ""),
-            "keywords": keywords,
+            "keywords": keywords or [],
         })
         return view

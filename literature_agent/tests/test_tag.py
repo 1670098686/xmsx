@@ -1,4 +1,4 @@
-"""阶段3 B3-5：标签分类管理业务测试（分类树/删除校验/事务绑定/合并/预设）。"""
+"""阶段3 B3-5：标签分类管理业务测试（分类树/删除校验/拖拽布局/事务绑定/预设）。"""
 import pytest
 
 from business.literature_import import LiteratureImportService
@@ -127,24 +127,109 @@ def test_delete_tag_cascades_bindings(mem_conn, storage, tmp_path):
     assert service.delete_tag(tag_id)[0] == C.CODE_FILE_NOT_FOUND
 
 
-def test_merge_tag_migrates_bindings(mem_conn, storage, tmp_path):
-    """合并标签：绑定迁移到目标标签，源标签删除。"""
+def test_save_category_layout_reorder_and_reparent(mem_conn):
+    """拖拽布局：同级重排与子分类↔根分类的层级调整都能落库。"""
     service = TagCategoryService()
-    _, src, _ = service.create_tag("合并源标签X")
-    _, target, _ = service.create_tag("合并目标标签Y")
-    lit1 = _import_one(tmp_path, name="a.txt", content="研究背景：第一篇。\n")
-    lit2 = _import_one(tmp_path, name="b.txt", content="研究背景：第二篇。\n")
-    service.bind_tags_to_lit(lit1["id"], [src])
-    service.bind_tags_to_lit(lit2["id"], [src, target])
+    seed_roots = [c["id"] for c in service.tag_dao.get_children(0)]
+    _, a, _ = service.create_category("根甲")
+    _, b, _ = service.create_category("根乙")
+    _, child, _ = service.create_category("子类", a)
 
-    code, _d, msg = service.merge_tag(src, target)
+    # 初始状态：种子根分类在前，随后根甲、根乙；子类挂在根甲下
+    tree = service.get_categories_tree()
+    root_a = next(node for node in tree if node["id"] == a)
+    assert [node["id"] for node in tree] == seed_roots + [a, b]
+    assert [node["id"] for node in root_a["children"]] == [child]
+
+    # 布局1：根乙排到根甲前；子类提升为根分类（排末尾）；种子分类保持不变
+    base = len(seed_roots)
+    layout = [
+        {"id": seed_id, "parent_id": 0, "sort_order": index + 1}
+        for index, seed_id in enumerate(seed_roots)
+    ]
+    layout += [
+        {"id": b, "parent_id": 0, "sort_order": base + 1},
+        {"id": a, "parent_id": 0, "sort_order": base + 2},
+        {"id": child, "parent_id": 0, "sort_order": base + 3},
+    ]
+    code, _d, msg = service.save_category_layout(child, layout)
     assert code == C.CODE_SUCCESS, msg
-    lit_tag_dao = LiteratureTagDao()
-    assert lit_tag_dao.count_by_tag(target) == 2
-    assert lit_tag_dao.count_by_tag(src) == 0
+    tree = service.get_categories_tree()
+    assert [node["id"] for node in tree] == seed_roots + [b, a, child]
+    assert next(node for node in tree if node["id"] == a)["children"] == []
 
-    assert service.merge_tag(target, target)[0] == C.CODE_FILE_INVALID
-    assert service.merge_tag(9998, 9999)[0] == C.CODE_FILE_NOT_FOUND
+    # 布局2：把根分类 child 再挂回根乙下
+    layout = [
+        {"id": seed_id, "parent_id": 0, "sort_order": index + 1}
+        for index, seed_id in enumerate(seed_roots)
+    ]
+    layout += [
+        {"id": b, "parent_id": 0, "sort_order": base + 1},
+        {"id": a, "parent_id": 0, "sort_order": base + 2},
+        {"id": child, "parent_id": b, "sort_order": 1},
+    ]
+    assert service.save_category_layout(child, layout)[0] == C.CODE_SUCCESS
+    tree = service.get_categories_tree()
+    assert [node["id"] for node in tree] == seed_roots + [b, a]
+    root_b = next(node for node in tree if node["id"] == b)
+    assert [node["id"] for node in root_b["children"]] == [child]
+
+
+def test_save_category_layout_rejects_invalid(mem_conn):
+    """拖拽布局：挂到自身/不存在父级/同名冲突一律拒绝。"""
+    service = TagCategoryService()
+    _, a, _ = service.create_category("根甲X")
+    _, b, _ = service.create_category("根乙X")
+    _, child, _ = service.create_category("子类X", a)
+
+    # 目标父级不存在
+    bad_parent = [
+        {"id": a, "parent_id": 9999, "sort_order": 1},
+        {"id": b, "parent_id": 0, "sort_order": 1},
+        {"id": child, "parent_id": a, "sort_order": 1},
+    ]
+    assert service.save_category_layout(a, bad_parent)[0] == C.CODE_FILE_NOT_FOUND
+
+    # 挂到自身下
+    self_parent = [
+        {"id": a, "parent_id": a, "sort_order": 1},
+        {"id": b, "parent_id": 0, "sort_order": 1},
+        {"id": child, "parent_id": a, "sort_order": 1},
+    ]
+    assert service.save_category_layout(a, self_parent)[0] == C.CODE_FILE_INVALID
+
+    # 与目标层级已有分类同名
+    _, dup_child, _ = service.create_category("根乙X", a)
+    same_name = [
+        {"id": a, "parent_id": 0, "sort_order": 1},
+        {"id": b, "parent_id": 0, "sort_order": 2},
+        {"id": child, "parent_id": a, "sort_order": 1},
+        {"id": dup_child, "parent_id": 0, "sort_order": 3},
+    ]
+    assert service.save_category_layout(dup_child, same_name)[0] == C.CODE_DUPLICATE
+
+    # 被拖动节点不存在 / 布局缺少被拖动节点
+    assert service.save_category_layout(9999, [])[0] == C.CODE_FILE_NOT_FOUND
+    assert service.save_category_layout(
+        a, [{"id": b, "parent_id": 0, "sort_order": 1}]
+    )[0] == C.CODE_FILE_INVALID
+
+
+def test_new_category_appends_sort_order(mem_conn):
+    """新增分类自动排到同级末尾（种子根分类之后）。"""
+    service = TagCategoryService()
+    seed_count = len(service.tag_dao.get_children(0))
+    _, first, _ = service.create_category("第一个根分类")
+    _, second, _ = service.create_category("第二个根分类")
+    _, sub, _ = service.create_category("子分类", first)
+    dao = service.tag_dao
+    assert dao.get_by_id(first)["sort_order"] == seed_count + 1
+    assert dao.get_by_id(second)["sort_order"] == seed_count + 2
+    assert dao.get_by_id(sub)["sort_order"] == 1
+    # move_category 移动到新父级后排到同级末尾
+    assert service.move_category(sub, 0)[0] == C.CODE_SUCCESS
+    assert dao.get_by_id(sub)["parent_id"] == 0
+    assert dao.get_by_id(sub)["sort_order"] == seed_count + 3
 
 
 def test_apply_preset_labels_idempotent(mem_conn):

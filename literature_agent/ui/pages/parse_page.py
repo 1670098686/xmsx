@@ -4,7 +4,7 @@ import re
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
-    QComboBox, QFileDialog, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
+    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
     QProgressBar, QPushButton, QScrollArea, QSplitter, QStackedWidget,
     QVBoxLayout, QWidget,
 )
@@ -16,11 +16,12 @@ from business.system_service import SystemService
 from config import constants as C
 from ui.widgets.buttons import GhostButton, PrimaryButton
 from ui.widgets.collapse import CollapseBlock
+from ui.widgets.dialogs import ExportFormatDialog
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.loading import LoadingMask
 from ui.widgets.pdf_viewer import PdfViewer
 from ui.widgets.toast import show_toast
-from ui.widgets.worker import ParseWorker, RenderPdfWorker
+from ui.widgets.worker import ExportWorker, ParseWorker, RenderPdfWorker
 
 # 报告 7 个折叠块（字段, 标题, 是否高亮）
 BLOCKS = [
@@ -55,10 +56,12 @@ class ParsePage(QWidget):
         self._export_service = ExportBackupService()
         self._worker = None
         self._loading = None
+        self._library_worker = None
         self._render_worker = None
         self._render_loading = None
         self._lit_list = []
         self._has_report = False
+        self._parse_canceled = False
         self._build_ui()
 
     # ================= UI =================
@@ -83,10 +86,16 @@ class ParsePage(QWidget):
         self.btn_reparse = GhostButton("重新解析")
         self.btn_export = GhostButton("导出报告")
         export_menu = QMenu(self)
-        for fmt, text in (("word", "导出为 Word"), ("txt", "导出为 TXT"),
-                          ("pdf", "导出为 PDF")):
+        action_save_lib = export_menu.addAction("保存到资料库…")
+        action_save_lib.triggered.connect(self._save_current_to_library)
+        export_menu.addSeparator()
+        for text, fmt in (("导出为 Word（另存为…）", "word"),
+                          ("导出为 TXT（另存为…）", "txt"),
+                          ("导出为 PDF（另存为…）", "pdf")):
             action = export_menu.addAction(text)
-            action.triggered.connect(lambda checked, f=fmt: self._export_report(f))
+            action.triggered.connect(
+                lambda checked, f=fmt: self._export_report(f)
+            )
         self.btn_export.setMenu(export_menu)
         self.btn_stop.setEnabled(False)
         self.btn_reparse.setEnabled(False)
@@ -97,6 +106,21 @@ class ParsePage(QWidget):
         toolbar.addWidget(self.btn_reparse)
         toolbar.addWidget(self.btn_export)
         root.addLayout(toolbar)
+
+        # 规则模板更新后，提示当前报告需重新解析的横幅
+        self.stale_bar = QFrame()
+        self.stale_bar.setObjectName("batchBar")
+        stale_layout = QHBoxLayout(self.stale_bar)
+        stale_layout.setContentsMargins(10, 6, 10, 6)
+        self.lbl_stale = QLabel("解析规则模板已更新，当前报告基于旧规则生成")
+        self.lbl_stale.setProperty("level", "aux")
+        self.btn_apply_rule = QPushButton("重新解析，应用最新规则")
+        self.btn_apply_rule.setCursor(Qt.PointingHandCursor)
+        stale_layout.addWidget(self.lbl_stale)
+        stale_layout.addStretch(1)
+        stale_layout.addWidget(self.btn_apply_rule)
+        self.stale_bar.setVisible(False)
+        root.addWidget(self.stale_bar)
 
         progress_row = QHBoxLayout()
         self.progress = QProgressBar()
@@ -124,6 +148,9 @@ class ParsePage(QWidget):
         self.btn_parse.clicked.connect(self._start_parse)
         self.btn_stop.clicked.connect(self._stop_parse)
         self.btn_reparse.clicked.connect(lambda: self._start_parse(reparse=True))
+        self.btn_apply_rule.clicked.connect(
+            lambda: self._start_parse(reparse=True)
+        )
 
     def _build_splitter(self) -> QSplitter:
         """构建文献选择、原文与报告分栏。"""
@@ -207,6 +234,7 @@ class ParsePage(QWidget):
             self.viewer.setPlainText("")
             self.pdf_viewer.close_document()
             self._clear_blocks()
+            self.stale_bar.setVisible(False)
 
     def select_literature(self, lit_id: int) -> None:
         """外部（检索页卡片/全局状态）请求选中某文献。"""
@@ -245,6 +273,13 @@ class ParsePage(QWidget):
             self._has_report = False
             self.btn_reparse.setEnabled(False)
             self.btn_export.setEnabled(False)
+        self._refresh_stale_hint(lit_id)
+
+    def _refresh_stale_hint(self, lit_id: int) -> None:
+        """报告早于最新默认解析规则时显示重新解析提示横幅。"""
+        stale = bool(lit_id) and self._has_report \
+            and self._parse_service.is_report_stale(lit_id)
+        self.stale_bar.setVisible(stale)
 
     def _load_original(self, lit_id: int) -> None:
         """按上传格式加载原文：子线程准备 PDF（PDF 直出、Word 转 PDF），TXT 走文本。"""
@@ -290,25 +325,56 @@ class ParsePage(QWidget):
 
     # ================= 解析 =================
 
-    def _start_parse(self, reparse: bool = False) -> None:
-        """启动解析子线程。"""
-        lit_id = self.current_lit_id()
-        if not lit_id:
-            show_toast("请先选择文献", "warn", parent=self.window())
+    def start_batch_reparse(self, lit_ids: list = None) -> None:
+        """规则更新后批量重新解析入口（管理中心保存规则并确认后由主窗口调用）。
+
+        Args:
+            lit_ids: 要重新解析的文献 id 列表；None 时自动取全部已解析文献。
+        """
+        if lit_ids is None:
+            lit_ids = self._parse_service.list_parsed_lit_ids()
+        lit_ids = list(lit_ids or [])
+        if not lit_ids:
+            show_toast("暂无需重新解析的文献", "info", parent=self.window())
             return
+        self._launch_parse(
+            lit_ids, True, f"正在按最新规则重新解析 {len(lit_ids)} 篇文献..."
+        )
+
+    def _launch_parse(self, lit_ids, reparse: bool, mask_text: str) -> bool:
+        """创建并启动解析子线程。
+
+        Args:
+            lit_ids: 单个文献 id 或 id 列表。
+            reparse: 是否覆盖旧报告重新解析。
+            mask_text: 遮罩上显示的进度文案。
+        Returns:
+            True 表示已启动；已有解析任务运行时返回 False。
+        """
         if self._worker and self._worker.isRunning():
             show_toast("解析进行中，请稍候", "info", parent=self.window())
-            return
-
-        self._worker = ParseWorker(lit_id, reparse=reparse, parent=self)
+            return False
+        self._parse_canceled = False
+        self._worker = ParseWorker(lit_ids, reparse=reparse, parent=self)
         self._worker.progress.connect(self._on_progress)
         self._worker.report_ready.connect(self._on_report_ready)
         self._worker.finished_all.connect(self._on_finished_all)
         self._worker.canceled.connect(self._on_canceled)
 
         self._loading = LoadingMask(self)
-        self._loading.show_progress(self, reparse and "重新解析中..." or "解析中...")
+        self._loading.show_progress(self, mask_text)
         self._set_running(True)
+        self._worker.start()
+        return True
+
+    def _start_parse(self, reparse: bool = False) -> None:
+        """启动当前选中文献的解析子线程。"""
+        lit_id = self.current_lit_id()
+        if not lit_id:
+            show_toast("请先选择文献", "warn", parent=self.window())
+            return
+        self._launch_parse(lit_id, reparse,
+                           "重新解析中..." if reparse else "解析中...")
 
     def _stop_parse(self) -> None:
         """请求中断解析任务。"""
@@ -329,7 +395,7 @@ class ParsePage(QWidget):
             self._fill_blocks(report)
 
     def _on_finished_all(self, success: list, failed: list) -> None:
-        """批量解析结束后汇总成功与失败。"""
+        """批量解析结束后汇总成功与失败，并引导保存报告到资料库。"""
         if self._loading:
             self._loading.hide_mask()
         self._set_running(False)
@@ -344,14 +410,93 @@ class ParsePage(QWidget):
             self.btn_export.setEnabled(True)
             show_toast("解析完成", "success", parent=self.window())
         self.refresh()
+        # 解析流程最后一步：选择格式并保存到项目资料库（用户被停止时不弹）
+        if success and not self._parse_canceled:
+            self._prompt_save_to_library(success)
 
     def _on_canceled(self) -> None:
         """解析被用户停止时恢复界面状态。"""
+        self._parse_canceled = True
         if self._loading:
             self._loading.hide_mask()
         self._set_running(False)
         self.progress_label.setText("已停止")
         show_toast("已停止解析", "warn", parent=self.window())
+
+    # ================= 保存报告到资料库 =================
+
+    def _save_current_to_library(self) -> None:
+        """手动把当前文献已解析的报告选择格式后保存到资料库。"""
+        lit_id = self.current_lit_id()
+        if not lit_id:
+            show_toast("请先选择并解析文献", "warn", parent=self.window())
+            return
+        fmt = ExportFormatDialog.choose(self, 1)
+        if not fmt:
+            return
+        if self._library_worker and self._library_worker.isRunning():
+            show_toast("报告保存中，请稍候", "info", parent=self.window())
+            return
+        # 手动保存不传当次报告，由业务层从数据库读取最新已存报告
+        self._library_worker = ExportWorker(
+            [lit_id], fmt, to_library=True, parent=self
+        )
+        self._library_worker.progress.connect(self._on_library_progress)
+        self._library_worker.finished_all.connect(self._on_library_saved)
+        self._loading = LoadingMask(self)
+        self._loading.show_progress(self, "正在保存解析报告到资料库...")
+        self._library_worker.start()
+
+    def _prompt_save_to_library(self, success_reports: list) -> None:
+        """解析完成后弹窗选择格式，并在子线程把报告保存到资料库。
+
+        Args:
+            success_reports: 本次解析成功的报告字典列表（含关键词附加信息）。
+        """
+        if not success_reports:
+            return
+        fmt = ExportFormatDialog.choose(self, len(success_reports))
+        if not fmt:
+            return  # 用户选择"暂不保存"
+        lit_ids = [int(report["literature_id"]) for report in success_reports]
+        report_map = {
+            int(report["literature_id"]): report for report in success_reports
+        }
+        if self._library_worker and self._library_worker.isRunning():
+            show_toast("报告保存中，请稍候", "info", parent=self.window())
+            return
+        self._library_worker = ExportWorker(
+            lit_ids, fmt, to_library=True, report_map=report_map, parent=self
+        )
+        self._library_worker.progress.connect(self._on_library_progress)
+        self._library_worker.finished_all.connect(self._on_library_saved)
+        self._loading = LoadingMask(self)
+        self._loading.show_progress(self, "正在保存解析报告到资料库...")
+        self._library_worker.start()
+
+    def _on_library_progress(self, percent: int, message: str) -> None:
+        """资料库保存进度更新。"""
+        if self._loading:
+            self._loading.show_percent(percent, message)
+
+    def _on_library_saved(self, result: dict) -> None:
+        """资料库批量保存结束后提示结果。"""
+        if self._loading:
+            self._loading.hide_mask()
+        self._library_worker = None
+        success_count = len(result.get("success", []))
+        failed = result.get("failed", [])
+        if success_count and not failed:
+            show_toast(f"已保存 {success_count} 篇解析报告到资料库", "success",
+                       parent=self.window())
+        elif success_count:
+            show_toast(
+                f"{success_count} 篇已保存，{len(failed)} 篇保存失败："
+                f"{failed[0]['msg']}", "warn", parent=self.window(),
+            )
+        else:
+            show_toast(f"保存失败：{failed[0]['msg'] if failed else '未知错误'}",
+                       "error", parent=self.window())
 
     def _set_running(self, running: bool) -> None:
         """按运行状态切换按钮与进度条展示。"""

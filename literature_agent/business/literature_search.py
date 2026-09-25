@@ -93,6 +93,31 @@ class LiteratureSearchService:
         """返回全部分类目录（tag_type=1）。"""
         return self.tag_dao.get_all_categories()
 
+    def get_category_tree_options(self) -> list:
+        """返回按分类树层级缩进的下拉选项（父节点在前、子节点紧随其后）。
+
+        Returns:
+            [{"id": 分类id, "text": 带全角空格缩进的显示文本}, ...]，
+            根分类文本为分类原名，子分类按深度加缩进与层级连接线。
+        """
+        categories = self.tag_dao.get_all_categories()
+        children_map = {}
+        for category in categories:
+            children_map.setdefault(category["parent_id"], []).append(category)
+
+        options = []
+
+        def walk(parent_id: int, depth: int) -> None:
+            """深度优先追加某父级下的分类选项。"""
+            for category in children_map.get(parent_id, []):
+                name = category["tag_name"]
+                text = name if depth == 0 else f"{'　' * depth}└ {name}"
+                options.append({"id": category["id"], "text": text})
+                walk(category["id"], depth + 1)
+
+        walk(0, 0)
+        return options
+
     def get_filter_options(self) -> dict:
         """组装检索页下拉筛选项（时间年份、文件格式）。
 

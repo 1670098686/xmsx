@@ -63,12 +63,14 @@ class TagCategoryService:
             return C.CODE_DUPLICATE, None, "同级下已存在同名分类"
         if self._find_label_by_name(name):
             return C.CODE_DUPLICATE, None, f"已存在同名标签“{name}”，请先改名或删除该标签"
+        sort_order = self._next_sort_order(int(parent_id or 0))
         try:
             category_id = self.tag_dao.insert({
                 "tag_type": C.TAG_TYPE_CATEGORY,
                 "tag_name": name,
                 "tag_color": color,
                 "parent_id": int(parent_id or 0),
+                "sort_order": sort_order,
             })
             write_operation_log(C.OP_CONFIG, f"新增分类：{name}")
             return C.CODE_SUCCESS, category_id, "分类创建成功"
@@ -113,12 +115,90 @@ class TagCategoryService:
         if self._find_same_name(C.TAG_TYPE_CATEGORY, category["tag_name"],
                                 new_parent_id):
             return C.CODE_DUPLICATE, None, "目标位置已存在同名分类"
+        sort_order = self._next_sort_order(new_parent_id)
         try:
-            self.tag_dao.update_by_id(cat_id, {"parent_id": new_parent_id})
+            self.tag_dao.update_by_id(cat_id, {
+                "parent_id": new_parent_id, "sort_order": sort_order,
+            })
             write_operation_log(
                 C.OP_CONFIG, f"移动分类：{category['tag_name']} → {new_parent_id}"
             )
             return C.CODE_SUCCESS, None, "分类已移动"
+        except Exception as exc:
+            return exception_to_code(exc), None, getattr(exc, "message", str(exc))
+
+    def save_category_layout(self, moved_id: int, layout: list) -> tuple:
+        """拖拽结束后保存整棵分类树的父子层级与同级排序（事务）。
+
+        界面按“文件夹拖拽”方式移动单个分类（其子树整体跟随），落库前在业务层
+        统一校验：所有节点必须存在、目标父级必须存在、最终结构不得成环、
+        同一父级下不得有同名分类。
+
+        Args:
+            moved_id: 本次被拖拽的分类 id。
+            layout: 全量节点布局 [{"id":int,"parent_id":int,"sort_order":int}, ...]。
+        Returns:
+            (code, None, msg)
+        """
+        moved = self.tag_dao.get_by_id(moved_id)
+        if not moved or moved["tag_type"] != C.TAG_TYPE_CATEGORY:
+            return C.CODE_FILE_NOT_FOUND, None, "被移动的分类不存在"
+
+        items, parent_map, seen = [], {}, set()
+        for node in layout or []:
+            try:
+                cat_id = int(node["id"])
+                parent_id = int(node.get("parent_id") or 0)
+                sort_order = int(node.get("sort_order", 0))
+            except (KeyError, TypeError, ValueError):
+                return C.CODE_FILE_INVALID, None, "分类布局数据格式非法"
+            if cat_id in seen:
+                continue
+            category = self.tag_dao.get_by_id(cat_id)
+            if not category or category["tag_type"] != C.TAG_TYPE_CATEGORY:
+                return C.CODE_FILE_NOT_FOUND, None, f"分类不存在：{cat_id}"
+            seen.add(cat_id)
+            parent_map[cat_id] = parent_id
+            items.append((cat_id, parent_id, sort_order, category["tag_name"]))
+        if moved_id not in seen:
+            return C.CODE_FILE_INVALID, None, "布局中缺少被移动的分类"
+
+        # 目标父级必须为根（0）或布局内的其它分类
+        for cat_id, parent_id in parent_map.items():
+            if parent_id != 0 and parent_id not in parent_map:
+                return C.CODE_FILE_NOT_FOUND, None, "目标父分类不存在"
+            if cat_id == parent_id:
+                return C.CODE_FILE_INVALID, None, "不能将分类移动到自身下"
+
+        # 最终结构成环检测（沿父链向上回溯）
+        for cat_id in parent_map:
+            chain, current = set(), cat_id
+            while current != 0:
+                if current in chain:
+                    return C.CODE_FILE_INVALID, None, "不能将分类移动到它自己的子分类下"
+                chain.add(current)
+                current = parent_map.get(current, 0)
+
+        # 同一父级下同名冲突
+        sibling_names = set()
+        for _cat_id, parent_id, _order, name in items:
+            key = (parent_id, name)
+            if key in sibling_names:
+                return C.CODE_DUPLICATE, None, "目标位置已存在同名分类"
+            sibling_names.add(key)
+
+        try:
+            with DatabaseManager().write_lock:
+                for cat_id, parent_id, sort_order, _name in items:
+                    self.tag_dao.update_by_id(cat_id, {
+                        "parent_id": parent_id, "sort_order": sort_order,
+                    })
+            write_operation_log(
+                C.OP_CONFIG,
+                f"调整分类排序/层级：{moved['tag_name']} → "
+                f"父分类 {parent_map.get(int(moved_id), 0)}",
+            )
+            return C.CODE_SUCCESS, None, "分类顺序已保存"
         except Exception as exc:
             return exception_to_code(exc), None, getattr(exc, "message", str(exc))
 
@@ -214,31 +294,6 @@ class TagCategoryService:
                 self.tag_dao.delete_by_id(tag_id)
             write_operation_log(C.OP_CONFIG, f"删除标签：{tag['tag_name']}")
             return C.CODE_SUCCESS, None, "标签已删除"
-        except Exception as exc:
-            return exception_to_code(exc), None, getattr(exc, "message", str(exc))
-
-    def merge_tag(self, source_tag_id: int, target_tag_id: int) -> tuple:
-        """合并标签：源标签的全部绑定迁移到目标标签后删除源标签（事务）。"""
-        if int(source_tag_id) == int(target_tag_id):
-            return C.CODE_FILE_INVALID, None, "源标签与目标标签相同"
-        source = self.tag_dao.get_by_id(source_tag_id)
-        target = self.tag_dao.get_by_id(target_tag_id)
-        if not source or not target:
-            return C.CODE_FILE_NOT_FOUND, None, "标签不存在"
-        if source["tag_type"] != C.TAG_TYPE_LABEL or \
-                target["tag_type"] != C.TAG_TYPE_LABEL:
-            return C.CODE_FILE_INVALID, None, "仅支持个性化标签合并"
-        try:
-            with DatabaseManager().write_lock:
-                source_lit_ids = self.lit_tag_dao.get_lit_ids_by_tag(source_tag_id)
-                for lit_id in source_lit_ids:
-                    self.lit_tag_dao.bind(lit_id, target_tag_id)
-                self.tag_dao.delete_by_id(source_tag_id)
-            write_operation_log(
-                C.OP_CONFIG,
-                f"合并标签：{source['tag_name']} → {target['tag_name']}",
-            )
-            return C.CODE_SUCCESS, None, "标签已合并"
         except Exception as exc:
             return exception_to_code(exc), None, getattr(exc, "message", str(exc))
 
@@ -339,3 +394,16 @@ class TagCategoryService:
                     return True
                 stack.append(child["id"])
         return False
+
+    def _next_sort_order(self, parent_id: int) -> int:
+        """返回指定父级下新节点的排序号（现有同级最大值 + 1）。
+
+        Args:
+            parent_id: 父分类 id，0 表示根层级。
+        Returns:
+            新的 sort_order 整数值。
+        """
+        siblings = self.tag_dao.get_children(int(parent_id or 0))
+        if not siblings:
+            return 1
+        return max(int(sibling.get("sort_order") or 0) for sibling in siblings) + 1

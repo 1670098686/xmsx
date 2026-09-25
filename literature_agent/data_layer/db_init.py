@@ -161,7 +161,7 @@ _INDEX_STATEMENTS = [
 
 
 def _default_rule_detail(weights=None):
-    """构造规则明细 JSON（维度开关 + 权重 + 关键词数量）。"""
+    """构造规则明细 JSON（维度开关 + 权重；各维度均按成段语句解析）。"""
     return json.dumps({
         "dimensions": {
             "research_background": True,
@@ -179,7 +179,6 @@ def _default_rule_detail(weights=None):
             "research_conclusion": 1.5,
             "reference_list": 1.0,
         },
-        "keyword_top_n": 20,
     }, ensure_ascii=False)
 
 
@@ -305,6 +304,29 @@ def _migrate_v1_to_v2_collision_tags(conn: sqlite3.Connection) -> tuple:
     return removed, promoted
 
 
+def _purge_legacy_keyword_config(conn: sqlite3.Connection) -> int:
+    """清理历史 rule_detail JSON 中已废弃的 keyword_top_n 字段（幂等）。
+
+    Returns:
+        被清理的规则条数。
+    """
+    rows = conn.execute("SELECT id, rule_detail FROM parse_rule").fetchall()
+    cleaned = 0
+    for rule_id, detail_text in rows:
+        try:
+            detail = json.loads(detail_text or "{}")
+        except (TypeError, ValueError):
+            continue
+        if "keyword_top_n" in detail:
+            detail.pop("keyword_top_n", None)
+            conn.execute(
+                "UPDATE parse_rule SET rule_detail = ? WHERE id = ?",
+                (json.dumps(detail, ensure_ascii=False), rule_id),
+            )
+            cleaned += 1
+    return cleaned
+
+
 def init_db(db_manager: DatabaseManager = None) -> None:
     """初始化数据库：建表、建索引、写种子数据、记录 schema 版本。
 
@@ -325,6 +347,7 @@ def init_db(db_manager: DatabaseManager = None) -> None:
         _seed_parse_rules(conn)
         _seed_category_tags(conn)
         _seed_system_config(conn)
+        _purge_legacy_keyword_config(conn)
 
         # 版本迁移（旧库升级；全新库 old_version=0 且无冲突数据，迁移为空操作）
         if old_version < 2:

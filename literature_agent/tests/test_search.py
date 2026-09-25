@@ -43,6 +43,24 @@ def test_get_all_literature(mem_conn, library):
     assert all("tags" in row for row in rows)
 
 
+def test_get_category_tree_options_indented(mem_conn):
+    """分类下拉选项按分类树层级缩进，且父分类紧邻子分类之前。"""
+    from business.tag_category import TagCategoryService
+    tag_svc = TagCategoryService()
+    roots = {c["tag_name"]: c["id"] for c in tag_svc.tag_dao.get_all_categories()}
+    code, child_id, msg = tag_svc.create_category("综述子类Z", roots["综述类"])
+    assert code == 0, msg
+
+    options = LiteratureSearchService().get_category_tree_options()
+    by_id = {opt["id"]: opt["text"] for opt in options}
+    order = [opt["id"] for opt in options]
+    # 根分类不缩进，子分类带缩进与层级连接线
+    assert by_id[roots["期刊论文"]] == "期刊论文"
+    assert by_id[child_id].startswith("　└ ")
+    # 子分类紧跟父分类
+    assert order.index(child_id) == order.index(roots["综述类"]) + 1
+
+
 def test_keyword_search_title_and_content(mem_conn, library):
     service = LiteratureSearchService()
     code, rows, _ = service.full_text_search("深度学习")

@@ -144,6 +144,12 @@ QPushButton#btnDanger:hover {
     background-color: %(error)s;
     color: #ffffff;
 }
+QPushButton#markToolBtn:checked {
+    background-color: %(primary)s;
+    border: 1px solid %(primary_border)s;
+    color: %(primary_text)s;
+    font-weight: bold;
+}
 
 /* ---------- 输入控件 ---------- */
 QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {

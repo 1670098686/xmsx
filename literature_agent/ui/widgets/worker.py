@@ -138,30 +138,46 @@ class ParseWorker(QThread):
 
 
 class ExportWorker(QThread):
-    """批量导出解析报告子线程。
+    """批量导出解析报告子线程（支持另存目录与保存到资料库两种模式）。
 
     Signals:
+        progress(int, str): 进度百分比、阶段描述。
         finished_all(dict): {"success": [...], "failed": [...]}。
     """
 
+    progress = pyqtSignal(int, str)
     finished_all = pyqtSignal(dict)
 
-    def __init__(self, lit_ids: list, fmt: str, output_dir: str, parent=None):
+    def __init__(self, lit_ids: list, fmt: str, output_dir: str = "",
+                 to_library: bool = False, report_map: dict = None,
+                 parent=None):
         """
         Args:
             lit_ids: 文献 id 列表。
             fmt: word/txt/pdf。
-            output_dir: 导出目录。
+            output_dir: 另存模式的导出目录（保存到资料库时忽略）。
+            to_library: True 时保存到项目资料库报告目录（时间戳历史版本）。
+            report_map: {lit_id: report_dict}，保留解析当次的关键词附加信息。
         """
         super().__init__(parent)
         self.lit_ids = lit_ids
         self.fmt = fmt
         self.output_dir = output_dir
+        self.to_library = to_library
+        self.report_map = report_map or {}
         self._service = ExportBackupService()
 
     def run(self):
-        """子线程执行批量导出。"""
-        result = self._service.export_batch(self.lit_ids, self.fmt, self.output_dir)
+        """子线程执行批量导出/资料库保存。"""
+        if self.to_library:
+            result = self._service.save_batch_to_library(
+                self.lit_ids, self.fmt, self.report_map,
+                progress_callback=lambda p, m: self.progress.emit(p, m),
+            )
+        else:
+            result = self._service.export_batch(
+                self.lit_ids, self.fmt, self.output_dir
+            )
         self.finished_all.emit(result)
 
 

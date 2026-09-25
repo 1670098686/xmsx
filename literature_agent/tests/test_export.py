@@ -22,9 +22,11 @@ def storage(tmp_path):
     """重定向文献与备份目录到临时目录。"""
     lit_dir = tmp_path / "lit_store"
     backup_dir = tmp_path / "backup_store"
+    report_dir = tmp_path / "report_store"
     SystemConfigDao().set(C.CFG_LITERATURE_PATH, str(lit_dir))
     SystemConfigDao().set(C.CFG_BACKUP_PATH, str(backup_dir))
-    return str(lit_dir), str(backup_dir)
+    SystemConfigDao().set(C.CFG_REPORT_PATH, str(report_dir))
+    return str(lit_dir), str(backup_dir), str(report_dir)
 
 
 def _import_one(tmp_path, name="paper.txt", content=SAMPLE_TEXT):
@@ -53,6 +55,111 @@ def test_export_report_txt(mem_conn, storage, tmp_path):
     code, _p, msg = service.export_report(lit["id"], "word", out_docx)
     assert code == C.CODE_SUCCESS, msg
     assert os.path.isfile(out_docx)
+
+
+def test_save_report_to_library_location_and_history(mem_conn, storage):
+    """报告保存到资料库报告目录；同秒重复保存保留历史版本不覆盖。"""
+    import time
+    import tempfile
+    from pathlib import Path
+    from business.literature_parse import LiteratureParseService
+    tmp_path = Path(tempfile.mkdtemp())
+    lit = _import_one(tmp_path)
+    _lit_dir, _backup_dir, report_dir = storage
+    code, report, msg = LiteratureParseService().parse_single(lit["id"])
+    assert code == C.CODE_SUCCESS, msg
+
+    service = ExportBackupService()
+    code, path1, msg = service.save_report_to_library(
+        lit["id"], "txt", report_data=report
+    )
+    assert code == C.CODE_SUCCESS, msg
+    def norm_path(value):
+        """归一化路径（解析 8.3 短路径、统一大小写）后比较。"""
+        return os.path.normcase(os.path.realpath(value))
+
+    assert norm_path(os.path.dirname(path1)) == norm_path(report_dir)
+    assert path1.endswith(".txt")
+    assert os.path.isfile(path1)
+
+    # 同秒再次保存：追加序号生成不同文件，历史版本保留
+    code, path2, msg = service.save_report_to_library(
+        lit["id"], "txt", report_data=report
+    )
+    assert code == C.CODE_SUCCESS, msg
+    assert path2 != path1
+    assert os.path.isfile(path1) and os.path.isfile(path2)
+
+    # 时间戳不同（隔 1.2 秒）时文件名也不同
+    time.sleep(1.2)
+    code, path3, msg = service.save_report_to_library(
+        lit["id"], "pdf", report_data=report
+    )
+    assert code == C.CODE_SUCCESS, msg
+    assert path3.endswith(".pdf") and path3 != path2
+    assert len([n for n in os.listdir(report_dir)]) == 3
+
+
+def test_save_report_to_library_keeps_keywords(mem_conn, storage):
+    """解析当次传入的报告含关键词附加信息，保存的 TXT 中应保留关键词行。"""
+    import tempfile
+    from pathlib import Path
+    from business.literature_parse import LiteratureParseService
+    tmp_path = Path(tempfile.mkdtemp())
+    lit = _import_one(tmp_path)
+    code, report, msg = LiteratureParseService().parse_single(lit["id"])
+    assert code == C.CODE_SUCCESS, msg
+    assert report.get("keywords"), "解析报告应携带关键词附加信息"
+
+    _lit_dir, _backup_dir, report_dir = storage
+    service = ExportBackupService()
+    code, path, msg = service.save_report_to_library(
+        lit["id"], "txt", report_data=report
+    )
+    assert code == C.CODE_SUCCESS, msg
+    with open(path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert "关键词：" in content
+
+
+def test_save_report_to_library_rejects_invalid(mem_conn, storage):
+    """未解析文献与非法格式被拒绝。"""
+    import tempfile
+    from pathlib import Path
+    lit = _import_one(Path(tempfile.mkdtemp()))
+    service = ExportBackupService()
+    assert service.save_report_to_library(lit["id"], "txt")[0] == C.CODE_PARSE_FAILED
+
+    from business.literature_parse import LiteratureParseService
+    assert LiteratureParseService().parse_single(lit["id"])[0] == C.CODE_SUCCESS
+    code, _p, msg = service.save_report_to_library(lit["id"], "excel")
+    assert code == C.CODE_FILE_INVALID and "word/txt/pdf" in msg
+
+
+def test_save_batch_to_library(mem_conn, storage):
+    """批量保存到资料库：全部成功并回调进度。"""
+    import tempfile
+    from pathlib import Path
+    from business.literature_parse import LiteratureParseService
+    tmp_path = Path(tempfile.mkdtemp())
+    lit1 = _import_one(tmp_path, name="p1.txt")
+    lit2 = _import_one(tmp_path, name="p2.txt",
+                       content="研究背景：批量保存第二篇。\n\n结论：第二篇结论。\n")
+    parse_service = LiteratureParseService()
+    assert parse_service.parse_single(lit1["id"])[0] == C.CODE_SUCCESS
+    assert parse_service.parse_single(lit2["id"])[0] == C.CODE_SUCCESS
+
+    _lit_dir, _backup_dir, report_dir = storage
+    progress = []
+    result = ExportBackupService().save_batch_to_library(
+        [lit1["id"], lit2["id"]], "word",
+        progress_callback=lambda p, m: progress.append(p),
+    )
+    assert result["failed"] == []
+    assert len(result["success"]) == 2
+    assert all(os.path.isfile(p) and p.endswith(".docx") for p in result["success"])
+    assert progress and progress[-1] == 100
+    assert len(os.listdir(report_dir)) == 2
 
 
 def test_full_backup_creates_zip_with_db_and_files(mem_conn, storage, tmp_path):
@@ -87,7 +194,7 @@ def test_restore_overwrites_current_database(mem_conn, storage, tmp_path):
     # 删除文献（级联清理），并手动移除受管文件模拟数据丢失
     lit_dao = LiteratureInfoDao()
     assert lit_dao.delete_by_id(lit_id) == 1
-    lit_dir, _ = storage
+    lit_dir, _backup, _report = storage
     for root, _dirs, files in os.walk(lit_dir):
         for name in files:
             os.remove(os.path.join(root, name))

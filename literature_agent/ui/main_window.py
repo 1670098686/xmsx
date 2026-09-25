@@ -195,6 +195,10 @@ class MainWindow(QMainWindow):
         self.page_import.go_library_requested.connect(
             lambda: self._switch_page(PAGE_SEARCH)
         )
+        # 默认解析规则保存后，用户确认立即重解析 → 跳解析页执行批量重新解析
+        self.page_setting.page_rules.reparse_requested.connect(
+            self._reparse_with_latest_rule
+        )
 
         layout.addWidget(self.stack)
 
@@ -276,6 +280,11 @@ class MainWindow(QMainWindow):
         """检索页卡片“解析”：跳解析页并选中该文献。"""
         self._switch_page(PAGE_PARSE)
         self.page_parse.select_literature(lit_id)
+
+    def _reparse_with_latest_rule(self) -> None:
+        """保存默认规则后用户确认重解析：跳解析页并批量重新解析全部已解析文献。"""
+        self._switch_page(PAGE_PARSE)
+        self.page_parse.start_batch_reparse()
 
     def closeEvent(self, event) -> None:
         """关闭窗口前落库全部防抖笔记并持久化会话状态。"""

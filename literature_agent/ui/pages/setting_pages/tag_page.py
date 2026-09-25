@@ -1,8 +1,8 @@
-"""管理中心 - 标签管理页：左侧分类树、右侧标签卡片（改色/删除/合并/套用预设）。"""
-from PyQt5.QtCore import Qt, QRectF
+"""管理中心 - 标签管理页：左侧分类树（拖拽排序/调级）、右侧标签卡片（改色/删除/预设）。"""
+from PyQt5.QtCore import Qt, QRectF, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (
-    QColorDialog, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QColorDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QSplitter, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -65,13 +65,22 @@ class SettingTagPage(QWidget):
         layout.addLayout(btn_row)
         layout.addWidget(self.btn_del_category)
 
-        self.tree = QTreeWidget()
+        self.tree = CategoryTreeWidget()
         self.tree.setHeaderLabels(["分类名称（关联文献数）"])
         self.tree.setSelectionMode(QTreeWidget.SingleSelection)
+        # 文件夹式内部拖拽：同级拖动排序，跨级拖动调整父子层级
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDragDropMode(QTreeWidget.InternalMove)
+        self.tree.setDefaultDropAction(Qt.MoveAction)
+        self.tree.setDropIndicatorShown(True)
+        self.tree.category_dropped.connect(self._on_category_dropped)
         layout.addWidget(self.tree, stretch=1)
 
-        tip = QLabel("含子分类或仍关联文献的分类不可删除")
+        tip = QLabel("拖拽分类可调整排序与层级（子分类可拖为根分类，根分类也可拖入其它分类）；"
+                     "含子分类或仍关联文献的分类不可删除")
         tip.setProperty("level", "aux")
+        tip.setWordWrap(True)
         layout.addWidget(tip)
 
         self.btn_add_root.clicked.connect(lambda: self._add_category(0))
@@ -157,18 +166,6 @@ class SettingTagPage(QWidget):
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
 
-        merge_row = QHBoxLayout()
-        merge_row.addWidget(QLabel("合并标签："))
-        self.combo_merge_source = QComboBox()
-        self.combo_merge_target = QComboBox()
-        self.btn_merge = GhostButton("合并 →")
-        merge_row.addWidget(self.combo_merge_source)
-        merge_row.addWidget(QLabel("并入"))
-        merge_row.addWidget(self.combo_merge_target)
-        merge_row.addWidget(self.btn_merge)
-        merge_row.addStretch(1)
-        layout.addLayout(merge_row)
-
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
@@ -185,7 +182,6 @@ class SettingTagPage(QWidget):
 
         self.btn_add_tag.clicked.connect(self._add_tag)
         self.btn_preset.clicked.connect(self._apply_preset)
-        self.btn_merge.clicked.connect(self._merge_tags)
         return card
 
     def _add_tag(self) -> None:
@@ -235,45 +231,84 @@ class SettingTagPage(QWidget):
         if code == 0 and inserted:
             self.refresh()
 
-    def _merge_tags(self) -> None:
-        """把源标签合并进目标标签（绑定迁移 + 删除源标签）。"""
-        source = self.combo_merge_source.currentData()
-        target = self.combo_merge_target.currentData()
-        if source is None or target is None:
-            show_toast("请选择源标签与目标标签", level="warn")
-            return
-        if source == target:
-            show_toast("源标签与目标标签不能相同", level="warn")
-            return
-        source_name = self.combo_merge_source.currentText()
-        target_name = self.combo_merge_target.currentText()
-        if not ConfirmDialog.confirm(
-            self, "合并标签",
-            f"将把「{source_name}」的全部文献绑定合并到「{target_name}」，"
-            "并删除源标签，确定继续？",
-            confirm_text="合并", danger=True,
-        ):
-            return
-        code, _data, msg = self._service.merge_tag(source, target)
+    # ================= 分类树拖拽 =================
+
+    def _on_category_dropped(self, moved_id: int) -> None:
+        """拖拽放置后收集新布局交业务层校验落库；失败时按数据库数据回滚视图。"""
+        code, _data, msg = self._service.save_category_layout(
+            moved_id, self._collect_tree_layout()
+        )
         show_toast(msg, level="success" if code == 0 else "error")
-        if code == 0:
-            self.refresh()
+        self.refresh(select_id=moved_id if code == 0 else None)
+
+    def _collect_tree_layout(self) -> list:
+        """按树当前显示顺序收集全量节点布局。
+
+        Returns:
+            [{"id": 分类id, "parent_id": 父分类id（0为根）, "sort_order": 同级序号}, ...]
+        """
+        layout = []
+
+        def walk(item: QTreeWidgetItem, parent_id: int) -> None:
+            """递归收集某节点下各子节点的父级与排序。"""
+            for order in range(item.childCount()):
+                child = item.child(order)
+                cat_id = child.data(0, Qt.UserRole)
+                layout.append({
+                    "id": cat_id, "parent_id": parent_id,
+                    "sort_order": order + 1,
+                })
+                walk(child, cat_id)
+
+        walk(self.tree.invisibleRootItem(), 0)
+        return layout
 
     # ================= 渲染 =================
 
-    def refresh(self) -> None:
-        """重新加载分类树与标签卡片。"""
+    def refresh(self, select_id=None) -> None:
+        """重新加载分类树与标签卡片，可选选中指定分类。
+
+        Args:
+            select_id: 刷新后需要重新选中并展开的分类 id。
+        """
         self.tree.clear()
         self._load_tree(self._service.get_categories_tree())
         for index in range(self.tree.columnCount()):
             self.tree.resizeColumnToContents(index)
+        if select_id is not None:
+            self._select_category(select_id)
 
         labels = self._service.list_labels_with_count()
         self._labels_by_id = {tag["id"]: tag for tag in labels}
         self._rebuild_grid(labels)
-        self._reload_merge_combos(labels)
         self.empty_state.setVisible(not labels)
         self.scroll.setVisible(bool(labels))
+
+    def _select_category(self, cat_id: int) -> None:
+        """在树中选中指定分类并展开其所在路径。"""
+        target = self._find_category_item(
+            self.tree.invisibleRootItem(), int(cat_id)
+        )
+        if target is None:
+            return
+        parent = target.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        target.setExpanded(True)
+        self.tree.setCurrentItem(target)
+
+    def _find_category_item(self, parent_item: QTreeWidgetItem,
+                            cat_id: int):
+        """递归查找指定 id 的树节点，找不到返回 None。"""
+        for index in range(parent_item.childCount()):
+            child = parent_item.child(index)
+            if child.data(0, Qt.UserRole) == cat_id:
+                return child
+            found = self._find_category_item(child, cat_id)
+            if found is not None:
+                return found
+        return None
 
     def _rebuild_grid(self, labels: list) -> None:
         """重建右侧标签卡片网格。"""
@@ -334,18 +369,6 @@ class SettingTagPage(QWidget):
         )
         return card
 
-    def _reload_merge_combos(self, labels: list) -> None:
-        """重建合并标签的两个下拉。"""
-        for combo in (self.combo_merge_source, self.combo_merge_target):
-            combo.clear()
-            for tag in labels:
-                combo.addItem(tag["tag_name"], tag["id"])
-        if labels:
-            self.combo_merge_source.setCurrentIndex(0)
-            self.combo_merge_target.setCurrentIndex(
-                min(1, len(labels) - 1)
-            )
-
     @staticmethod
     def _pick_color(default_color: str, title: str) -> str:
         """打开取色器，用户取消时返回默认色。"""
@@ -353,6 +376,25 @@ class SettingTagPage(QWidget):
         if not color.isValid():
             return default_color
         return color.name().upper()
+
+
+class CategoryTreeWidget(QTreeWidget):
+    """支持内部拖拽的分类树。
+
+    Signals:
+        category_dropped(int): 拖拽放置完成，传出被拖动分类的 id；
+            最终是否合法由业务层校验，界面以数据库结果重建树（非法拖放自动回滚）。
+    """
+
+    category_dropped = pyqtSignal(int)
+
+    def dropEvent(self, event) -> None:
+        """记录被拖动节点后执行默认放置，放置被接受时通知上层持久化。"""
+        current = self.currentItem()
+        moved_id = current.data(0, Qt.UserRole) if current else None
+        super().dropEvent(event)
+        if event.isAccepted() and moved_id is not None:
+            self.category_dropped.emit(moved_id)
 
 
 def _color_dot_icon(color_hex: str) -> QIcon:

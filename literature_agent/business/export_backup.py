@@ -71,6 +71,102 @@ class ExportBackupService:
             )
             return code, None, msg
 
+    def save_report_to_library(self, lit_id: int, fmt: str,
+                               report_data: dict = None) -> tuple:
+        """解析完成后把报告保存到项目资料库的报告存储目录。
+
+        文件名含时间戳，同一篇文献多次保存会保留全部历史版本文件；
+        同一秒内重复保存时自动追加序号，绝不覆盖旧文件。
+
+        Args:
+            lit_id: 文献 id。
+            fmt: word/txt/pdf。
+            report_data: 可选报告字典（解析当次传入可保留关键词附加信息）；
+                         不传时从数据库读取已存报告。
+        Returns:
+            (code, output_path, msg)
+        """
+        try:
+            if report_data is None:
+                report_data = self.parse_service.get_report(lit_id)
+            if not report_data:
+                return C.CODE_PARSE_FAILED, None, "该文献尚未解析，请先解析后再保存"
+            if fmt not in ("word", "txt", "pdf"):
+                return C.CODE_FILE_INVALID, None, \
+                    f"不支持的导出格式：{fmt}（仅支持 word/txt/pdf）"
+            suffix = self._fmt_suffix(fmt)
+
+            title = report_data.get("literature_title") or f"文献{lit_id}"
+            safe_title = self._safe_filename(str(title))
+            report_dir = file_helper.ensure_dir(get_base_dir("report"))
+            timestamp = now_str("%Y%m%d_%H%M%S")
+            base_name = f"解析报告_{safe_title}_{lit_id}_{timestamp}"
+            output_path = self._unique_library_path(report_dir, base_name, suffix)
+
+            export_generator.export_report(report_data, output_path, fmt)
+            write_operation_log(
+                C.OP_EXPORT,
+                f"报告已保存到资料库：{title}（{fmt}）", lit_id,
+            )
+            return C.CODE_SUCCESS, output_path, "已保存到资料库"
+        except Exception as exc:
+            code = exception_to_code(exc)
+            msg = getattr(exc, "message", str(exc))
+            logger.error("报告保存到资料库失败 lit_id=%s：%s", lit_id, msg,
+                         exc_info=True)
+            write_operation_log(
+                C.OP_EXPORT, f"报告保存到资料库失败[id={lit_id}]：{msg}",
+                lit_id, C.OP_STATUS_FAILED,
+            )
+            return code, None, msg
+
+    def save_batch_to_library(self, lit_ids: list, fmt: str,
+                              report_map: dict = None,
+                              progress_callback=None) -> dict:
+        """批量把解析报告保存到资料库报告目录。
+
+        Args:
+            lit_ids: 文献 id 列表。
+            fmt: word/txt/pdf。
+            report_map: {lit_id: report_dict}，解析当次的报告可保留关键词。
+            progress_callback: 可选回调 (percent:int, message:str)。
+        Returns:
+            {"success": [path,...], "failed": [{"lit_id","msg"},...]}
+        """
+        report_map = report_map or {}
+        result = {"success": [], "failed": []}
+        total = len(lit_ids) or 1
+        for index, lit_id in enumerate(lit_ids):
+            code, path, msg = self.save_report_to_library(
+                lit_id, fmt, report_map.get(lit_id)
+            )
+            if code == C.CODE_SUCCESS:
+                result["success"].append(path)
+            else:
+                result["failed"].append({"lit_id": lit_id, "msg": msg})
+            if progress_callback:
+                percent = int((index + 1) / total * 100)
+                progress_callback(
+                    percent, f"保存报告到资料库 {index + 1}/{total}"
+                )
+        return result
+
+    @staticmethod
+    def _unique_library_path(report_dir: str, base_name: str,
+                             suffix: str) -> str:
+        """生成资料库内不冲突的报告文件路径（重名追加 _2/_3... 保留历史）。"""
+        candidate = os.path.join(report_dir, base_name + suffix)
+        if not os.path.exists(candidate):
+            return candidate
+        for seq in range(2, 10000):
+            candidate = os.path.join(report_dir, f"{base_name}_{seq}{suffix}")
+            if not os.path.exists(candidate):
+                return candidate
+        # 理论不可达：兜底加毫秒，保证不覆盖历史文件
+        return os.path.join(
+            report_dir, f"{base_name}_{now_str('%H%M%S_%f')}{suffix}"
+        )
+
     def export_batch(self, lit_ids: list, fmt: str, output_dir: str) -> dict:
         """批量导出解析报告。
 

@@ -164,7 +164,7 @@ class SearchPage(QWidget):
     def _reload_filter_combos(self) -> None:
         """重新加载标签/年份/类型筛选下拉项并保留选择。"""
         tags = self._service.get_all_tags()
-        categories = self._service.get_all_categories()
+        category_options = self._service.get_category_tree_options()
         options = self._service.get_filter_options()
 
         self.combo_tag.blockSignals(True)
@@ -177,10 +177,8 @@ class SearchPage(QWidget):
         self.combo_category_filter.blockSignals(True)
         self.combo_category_filter.clear()
         self.combo_category_filter.addItem("全部分类", None)
-        for category in categories:
-            self.combo_category_filter.addItem(
-                category.get("tag_name", ""), category["id"]
-            )
+        for category in category_options:
+            self.combo_category_filter.addItem(category["text"], category["id"])
         self.combo_category_filter.blockSignals(False)
 
         self.combo_year.blockSignals(True)
@@ -200,8 +198,8 @@ class SearchPage(QWidget):
 
         self.combo_category.clear()
         self.combo_category.addItem("选择分类…", None)
-        for category in categories:
-            self.combo_category.addItem(category.get("tag_name", ""), category["id"])
+        for category in category_options:
+            self.combo_category.addItem(category["text"], category["id"])
 
     def _current_filters(self) -> dict:
         """收集当前筛选条件为查询字典。"""

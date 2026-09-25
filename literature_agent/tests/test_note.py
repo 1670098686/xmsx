@@ -5,7 +5,9 @@ import pytest
 
 from business.literature_import import LiteratureImportService
 from business.note_manage import (
-    NoteManageService, encode_pdf_anchor, is_pdf_anchor, parse_pdf_anchor,
+    NoteManageService, encode_pdf_anchor, encode_pdf_mark_anchor,
+    encode_text_anchor, is_pdf_anchor, parse_pdf_anchor,
+    parse_pdf_mark_anchor, parse_pdf_note_anchor, parse_text_anchor,
 )
 from config import constants as C
 from data_layer.dao.config_dao import SystemConfigDao
@@ -176,3 +178,198 @@ def test_add_pdf_annotation_validation(mem_conn, lit_id):
     assert code == C.CODE_FILE_NOT_FOUND
     code, _n, msg = service.add_pdf_annotation(lit_id, 0, (5, 5, 1, 1), "x")
     assert code == C.CODE_FILE_INVALID and "非法" in msg
+
+
+# ================= PDF 文字标记（高亮/下划线/删除线） =================
+
+@pytest.mark.parametrize("kind,prefix", [
+    (C.MARK_KIND_HIGHLIGHT, C.NOTE_PDF_HIGHLIGHT_PREFIX),
+    (C.MARK_KIND_UNDERLINE, C.NOTE_PDF_UNDERLINE_PREFIX),
+    (C.MARK_KIND_STRIKEOUT, C.NOTE_PDF_STRIKEOUT_PREFIX),
+])
+def test_pdf_mark_anchor_roundtrip(kind, prefix):
+    """词区间锚点编码→解析往返一致，长度满足 VARCHAR(50)。"""
+    anchor = encode_pdf_mark_anchor(kind, 2, 12, 38)
+    assert anchor == f"{prefix}2:12-38"
+    assert len(anchor) <= 50
+    assert is_pdf_anchor(anchor)
+    assert parse_pdf_anchor(anchor) is None       # 不属于区域框锚点
+    assert parse_pdf_mark_anchor(anchor) == (kind, 2, 12, 38)
+
+
+def test_encode_pdf_mark_anchor_rejects_invalid():
+    """非法类型/负页码/反向词区间均抛 ValueError。"""
+    with pytest.raises(ValueError):
+        encode_pdf_mark_anchor(C.MARK_KIND_BOX, 0, 0, 1)
+    with pytest.raises(ValueError):
+        encode_pdf_mark_anchor(C.MARK_KIND_HIGHLIGHT, -1, 0, 1)
+    with pytest.raises(ValueError):
+        encode_pdf_mark_anchor(C.MARK_KIND_HIGHLIGHT, 0, 9, 3)
+    assert parse_pdf_mark_anchor("pdfh:0:x-3") is None
+    assert parse_pdf_mark_anchor("pdfh:0:3-1") is None
+    assert parse_pdf_mark_anchor("3") is None
+
+
+def test_parse_pdf_note_anchor_dispatch():
+    """统一解析：区域框返回 rect，文字标记返回 span，互不串台。"""
+    boxed = parse_pdf_note_anchor(encode_pdf_anchor(1, (1.0, 2.0, 30.0, 40.0)))
+    assert boxed["kind"] == C.MARK_KIND_BOX
+    assert boxed["page"] == 1
+    assert boxed["rect"] == (1.0, 2.0, 30.0, 40.0)
+    assert boxed["span"] is None
+
+    marked = parse_pdf_note_anchor(
+        encode_pdf_mark_anchor(C.MARK_KIND_UNDERLINE, 4, 7, 10))
+    assert marked["kind"] == C.MARK_KIND_UNDERLINE
+    assert marked["page"] == 4
+    assert marked["span"] == (7, 10)
+    assert marked["rect"] is None
+
+    assert parse_pdf_note_anchor("3") is None
+    assert parse_pdf_note_anchor("txh:0-10") is None
+
+
+def test_add_pdf_markup_empty_content_and_default_color(mem_conn, lit_id):
+    """纯高亮允许无批注文字，未指定颜色时按类型补默认色。"""
+    service = NoteManageService()
+    code, note, msg = service.add_pdf_markup(
+        lit_id, C.MARK_KIND_HIGHLIGHT, 0, 3, 8)
+    assert code == 0, msg
+    assert note["note_content"] == ""
+    assert note["highlight_style"] == C.NOTE_DEFAULT_MARK_COLOR
+    assert parse_pdf_mark_anchor(note["paragraph_pos"]) == (
+        C.MARK_KIND_HIGHLIGHT, 0, 3, 8)
+
+
+def test_add_pdf_markup_with_content_and_custom_color(mem_conn, lit_id):
+    """文字标记可携带批注文字与自定义颜色。"""
+    service = NoteManageService()
+    code, note, msg = service.add_pdf_markup(
+        lit_id, C.MARK_KIND_UNDERLINE, 2, 0, 2, "关键结论", "#9AD0FF")
+    assert code == 0, msg
+    assert note["note_content"] == "关键结论"
+    assert note["highlight_style"] == "#9AD0FF"
+    # 批注文字后续可通过 update_note 补写
+    code, _u, msg = service.update_note(note["id"], {"note_content": "修订"})
+    assert code == 0, msg
+    service.flush_note(note["id"])
+    assert LiteratureNoteDao().get_by_id(note["id"])["note_content"] == "修订"
+
+
+def test_add_pdf_markup_validation(mem_conn, lit_id):
+    """非法类型/文献不存在/反向词区间被拒绝。"""
+    service = NoteManageService()
+    code, _n, _m = service.add_pdf_markup(
+        lit_id, C.MARK_KIND_COMMENT, 0, 0, 1)   # PDF 标记不支持 comment
+    assert code == C.CODE_FILE_INVALID
+    code, _n, _m = service.add_pdf_markup(
+        9999, C.MARK_KIND_HIGHLIGHT, 0, 0, 1)
+    assert code == C.CODE_FILE_NOT_FOUND
+    code, _n, msg = service.add_pdf_markup(
+        lit_id, C.MARK_KIND_STRIKEOUT, 0, 6, 2)
+    assert code == C.CODE_FILE_INVALID and "非法" in msg
+
+
+# ================= TXT 字符区间标记 =================
+
+@pytest.mark.parametrize("kind,prefix", [
+    (C.MARK_KIND_COMMENT, C.NOTE_TEXT_COMMENT_PREFIX),
+    (C.MARK_KIND_HIGHLIGHT, C.NOTE_TEXT_HIGHLIGHT_PREFIX),
+    (C.MARK_KIND_UNDERLINE, C.NOTE_TEXT_UNDERLINE_PREFIX),
+    (C.MARK_KIND_STRIKEOUT, C.NOTE_TEXT_STRIKEOUT_PREFIX),
+])
+def test_text_anchor_roundtrip(kind, prefix):
+    """字符区间锚点编码→解析往返一致（半开区间）。"""
+    anchor = encode_text_anchor(kind, 120, 186)
+    assert anchor == f"{prefix}120-186"
+    assert len(anchor) <= 50
+    assert parse_text_anchor(anchor) == (kind, 120, 186)
+    assert is_pdf_anchor(anchor) is False
+
+
+def test_encode_text_anchor_rejects_invalid():
+    """非法类型/负偏移/空区间/闭端不大于开端均拒绝。"""
+    with pytest.raises(ValueError):
+        encode_text_anchor(C.MARK_KIND_BOX, 0, 1)
+    with pytest.raises(ValueError):
+        encode_text_anchor(C.MARK_KIND_HIGHLIGHT, -1, 1)
+    with pytest.raises(ValueError):
+        encode_text_anchor(C.MARK_KIND_HIGHLIGHT, 5, 5)
+    with pytest.raises(ValueError):
+        encode_text_anchor(C.MARK_KIND_HIGHLIGHT, 9, 3)
+    assert parse_text_anchor("txh:a-3") is None
+    assert parse_text_anchor("pdfh:0:1-3") is None
+    assert parse_text_anchor("") is None
+
+
+def test_add_text_mark_comment_requires_content(mem_conn, lit_id):
+    """选中批注必须有文字，纯划线则允许空内容。"""
+    service = NoteManageService()
+    code, _n, msg = service.add_text_mark(
+        lit_id, C.MARK_KIND_COMMENT, 0, 5, "   ")
+    assert code == C.CODE_FILE_INVALID and "不能为空" in msg
+
+    code, note, msg = service.add_text_mark(
+        lit_id, C.MARK_KIND_COMMENT, 0, 5, "此处存疑")
+    assert code == 0, msg
+    assert parse_text_anchor(note["paragraph_pos"]) == (
+        C.MARK_KIND_COMMENT, 0, 5)
+
+    for kind in (C.MARK_KIND_HIGHLIGHT, C.MARK_KIND_UNDERLINE,
+                 C.MARK_KIND_STRIKEOUT):
+        code, note, msg = service.add_text_mark(lit_id, kind, 10, 20)
+        assert code == 0, msg
+        assert note["note_content"] == ""
+
+
+def test_add_text_mark_colors(mem_conn, lit_id):
+    """自定义颜色落库；空颜色按类型补默认（高亮黄、划线红）。"""
+    service = NoteManageService()
+    code, highlight, _ = service.add_text_mark(
+        lit_id, C.MARK_KIND_HIGHLIGHT, 0, 4)
+    assert highlight["highlight_style"] == C.NOTE_DEFAULT_MARK_COLOR
+    code, underline, _ = service.add_text_mark(
+        lit_id, C.MARK_KIND_UNDERLINE, 5, 9, highlight_style="#FFB3C7")
+    assert underline["highlight_style"] == "#FFB3C7"
+    code, strike, _ = service.add_text_mark(
+        lit_id, C.MARK_KIND_STRIKEOUT, 10, 14)
+    assert strike["highlight_style"] == C.NOTE_DEFAULT_LINE_COLOR
+
+
+def test_add_text_mark_validation(mem_conn, lit_id):
+    """非法类型/文献不存在/非法区间被拒绝。"""
+    service = NoteManageService()
+    code, _n, _m = service.add_text_mark(
+        lit_id, C.MARK_KIND_BOX, 0, 1, "x")
+    assert code == C.CODE_FILE_INVALID
+    code, _n, _m = service.add_text_mark(
+        9999, C.MARK_KIND_HIGHLIGHT, 0, 1)
+    assert code == C.CODE_FILE_NOT_FOUND
+    code, _n, msg = service.add_text_mark(
+        lit_id, C.MARK_KIND_HIGHLIGHT, 8, 2)
+    assert code == C.CODE_FILE_INVALID and "非法" in msg
+
+
+def test_mixed_anchors_coexist_in_order(mem_conn, lit_id):
+    """区域框/词标记/字符区间/旧段落锚点共存，按插入顺序返回且可分类。"""
+    service = NoteManageService()
+    service.add_pdf_annotation(lit_id, 0, (0.0, 0.0, 10.0, 10.0), "框")
+    service.add_paragraph_note(lit_id, "0", "段")
+    service.add_pdf_markup(lit_id, C.MARK_KIND_HIGHLIGHT, 1, 0, 2)
+    service.add_text_mark(lit_id, C.MARK_KIND_COMMENT, 0, 3, "选区批注")
+
+    notes = service.get_notes_by_lit(lit_id)
+    assert len(notes) == 4
+    kinds = []
+    for note in notes:
+        info = parse_pdf_note_anchor(note["paragraph_pos"])
+        if info is not None:
+            kinds.append(info["kind"])
+        elif parse_text_anchor(note["paragraph_pos"]):
+            kinds.append(C.MARK_KIND_COMMENT)
+        else:
+            kinds.append("paragraph")
+    assert kinds == [
+        C.MARK_KIND_BOX, "paragraph", C.MARK_KIND_HIGHLIGHT,
+        C.MARK_KIND_COMMENT,
+    ]

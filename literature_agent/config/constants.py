@@ -51,6 +51,9 @@ PARSE_IN_PROGRESS = 1   # 解析中
 PARSE_DONE = 2          # 已解析
 PARSE_FAILED = 3        # 解析失败
 
+# 关键词作为解析报告的附加信息固定提取条数（不在规则模板中提供数量配置）
+PARSE_KEYWORD_TOP_N = 20
+
 # ========== 标签类型（category_tag.tag_type）==========
 TAG_TYPE_CATEGORY = 1   # 分类目录
 TAG_TYPE_LABEL = 2      # 标签
@@ -94,10 +97,49 @@ NOTE_TYPE_PARAGRAPH = "paragraph"   # 段落批注（纯文本文献段落 / PDF
 NOTE_TYPE_GLOBAL = "global"         # 全局笔记
 
 # ========== PDF 批注锚点（复用 literature_note.paragraph_pos，VARCHAR(50)）==========
-# 形如 "pdf:2:90,170,506,590"：pdf:页序(0基):矩形左上右下边（PDF 点，1/72 英寸）
+# 区域框批注：形如 "pdf:2:90,170,506,590"：pdf:页序(0基):矩形左上右下边（PDF 点）
 NOTE_PDF_ANCHOR_PREFIX = "pdf:"
+# WPS 式文字标记：词区间锚点，形如 "pdfh:2:12-38"（页序0基:起词序号-止词序号）
+NOTE_PDF_HIGHLIGHT_PREFIX = "pdfh:"   # 荧光高亮
+NOTE_PDF_UNDERLINE_PREFIX = "pdfu:"   # 下划线
+NOTE_PDF_STRIKEOUT_PREFIX = "pdfs:"   # 删除线
+# TXT 字符区间锚点：形如 "txh:120-186"（渲染文本字符起-止，半开区间）
+NOTE_TEXT_COMMENT_PREFIX = "txc:"     # 选中文字批注（浅底）
+NOTE_TEXT_HIGHLIGHT_PREFIX = "txh:"
+NOTE_TEXT_UNDERLINE_PREFIX = "txu:"
+NOTE_TEXT_STRIKEOUT_PREFIX = "txs:"
 PDF_ANNOT_MIN_DRAG_PX = 6    # 小于该拖拽距离视为点击而非框选（屏幕像素）
 PDF_ANNOT_BADGE_MARGIN = 3   # 批注序号角标与矩形左上的间距（像素）
+
+# ========== WPS 式划线标记类型 ==========
+MARK_KIND_BOX = "box"                 # PDF 区域框批注 / TXT 段落批注
+MARK_KIND_COMMENT = "comment"         # 选中文字后书写的批注
+MARK_KIND_HIGHLIGHT = "highlight"     # 荧光笔高亮
+MARK_KIND_UNDERLINE = "underline"     # 下划线
+MARK_KIND_STRIKEOUT = "strikeout"     # 删除线
+# 标记类型 → PDF 锚点前缀
+PDF_MARK_PREFIXES = {
+    MARK_KIND_HIGHLIGHT: NOTE_PDF_HIGHLIGHT_PREFIX,
+    MARK_KIND_UNDERLINE: NOTE_PDF_UNDERLINE_PREFIX,
+    MARK_KIND_STRIKEOUT: NOTE_PDF_STRIKEOUT_PREFIX,
+}
+# 标记类型 → TXT 锚点前缀
+TEXT_MARK_PREFIXES = {
+    MARK_KIND_COMMENT: NOTE_TEXT_COMMENT_PREFIX,
+    MARK_KIND_HIGHLIGHT: NOTE_TEXT_HIGHLIGHT_PREFIX,
+    MARK_KIND_UNDERLINE: NOTE_TEXT_UNDERLINE_PREFIX,
+    MARK_KIND_STRIKEOUT: NOTE_TEXT_STRIKEOUT_PREFIX,
+}
+# 标记颜色：用户在批注工具条自定义（QColorDialog），持久化于系统配置表
+NOTE_DEFAULT_MARK_COLOR = "#FFE066"       # 首次使用的初始色 / 无记录时兜底
+NOTE_DEFAULT_LINE_COLOR = "#E0463C"       # 下划线/删除线业务层兜底色
+# 标记绘制视觉参数
+MARK_FILL_ALPHA = 110            # 高亮填充透明度 0~255
+MARK_COMMENT_BG_ALPHA = 70       # 文字批注浅底透明度
+MARK_LINE_ALPHA = 230            # 下划线/删除线颜色透明度
+MARK_LINE_WIDTH_PX = 2           # 下划线/删除线线宽（像素）
+MARK_SELECTED_BORDER_ALPHA = 200  # 选中标记描边透明度
+PDF_MARK_WORD_HIT_PT = 6.0       # PDF 词命中容差（PDF 点），未直接命中时吸附最近词
 
 # ========== 系统配置键名（system_config.config_key）==========
 CFG_LITERATURE_PATH = "literature_path"
@@ -108,8 +150,11 @@ CFG_AUTO_SAVE_TIME = "auto_save_time"
 CFG_BACKUP_CYCLE = "backup_cycle"
 CFG_EXPORT_DEFAULT_TYPE = "export_default_type"
 CFG_UI_STYLE = "ui_style"
+CFG_NOTE_MARK_COLOR = "note_mark_color"  # 批注标记自定义颜色（#RRGGBB）
 CFG_PARSE_DEFAULT_RULE = "parse_default_rule"
 CFG_PRECISION_DEFAULT = "precision_default"
+# 默认解析规则最近一次修改时间（UTC 字符串），用于提示旧报告重新解析
+CFG_PARSE_RULE_VERSION = "parse_rule_version"
 CFG_AUTO_SAVE_DEBOUNCE = "auto_save_debounce"
 CFG_AI_MODELS = "ai_models"
 # 阶段4：会话状态恢复（上次页面 / 管理子页 / 检索条件）

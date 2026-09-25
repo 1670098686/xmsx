@@ -11,6 +11,11 @@ CHOICE_OVERWRITE = "overwrite"
 CHOICE_SKIP = "skip"
 CHOICE_SKIP_ALL = "skip_all"
 
+# 解析报告保存格式选择结果
+REPORT_FMT_WORD = "word"
+REPORT_FMT_TXT = "txt"
+REPORT_FMT_PDF = "pdf"
+
 
 class ConfirmDialog(QDialog):
     """高危操作二次确认对话框。"""
@@ -209,3 +214,77 @@ class InputDialog(QDialog):
         if dialog.exec_() != QDialog.Accepted:
             return None
         return dialog.input.text().strip()
+
+
+class ExportFormatDialog(QDialog):
+    """解析完成后选择报告文件格式并保存到资料库的对话框。"""
+
+    def __init__(self, parent=None, lit_count: int = 1):
+        """初始化格式选择控件。
+
+        Args:
+            lit_count: 本次解析成功的文献数量（用于文案单复数）。
+        """
+        super().__init__(parent)
+        self.setWindowTitle("保存解析报告")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowCloseButtonHint)
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.selected_fmt = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        box = QFrame()
+        box.setObjectName("modalBox")
+        root.addWidget(box)
+
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(12)
+
+        title_label = QLabel("保存解析报告到资料库")
+        title_label.setObjectName("pageTitle")
+        layout.addWidget(title_label)
+        target = "该篇文献的解析报告" if lit_count <= 1 else \
+            f"本次解析成功的 {lit_count} 篇文献报告"
+        content = QLabel(
+            f"{target}将以所选格式保存到项目资料库的报告存储目录，"
+            "历史版本会自动保留。"
+        )
+        content.setWordWrap(True)
+        content.setProperty("level", "aux")
+        layout.addWidget(content)
+
+        footer = QHBoxLayout()
+        btn_skip = QPushButton("暂不保存")
+        btn_word = QPushButton("Word 文档")
+        btn_txt = QPushButton("TXT 文本")
+        btn_pdf = PrimaryButton("PDF 文档")
+        footer.addStretch(1)
+        footer.addWidget(btn_skip)
+        footer.addWidget(btn_word)
+        footer.addWidget(btn_txt)
+        footer.addWidget(btn_pdf)
+        layout.addLayout(footer)
+
+        btn_skip.clicked.connect(self.reject)
+        btn_word.clicked.connect(lambda: self._select(REPORT_FMT_WORD))
+        btn_txt.clicked.connect(lambda: self._select(REPORT_FMT_TXT))
+        btn_pdf.clicked.connect(lambda: self._select(REPORT_FMT_PDF))
+
+    def _select(self, fmt: str) -> None:
+        """记录所选格式并关闭弹窗。"""
+        self.selected_fmt = fmt
+        self.accept()
+
+    @staticmethod
+    def choose(parent=None, lit_count: int = 1):
+        """模态弹出格式选择框。
+
+        Returns:
+            word/txt/pdf；用户选择"暂不保存"或关闭时返回 None。
+        """
+        dialog = ExportFormatDialog(parent, lit_count)
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        return dialog.selected_fmt

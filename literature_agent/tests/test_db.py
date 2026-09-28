@@ -310,3 +310,28 @@ def test_migrate_v2_collision_tags(mem_conn):
     assert lt_dao.get_tag_ids_by_lit(lit_classified) == []
     # 幂等：再次执行无操作
     assert _migrate_v1_to_v2_collision_tags(mem_conn) == (0, 0)
+
+
+# ---------- schema v4 迁移：旧版 .doc 格式订正 ----------
+
+def test_migrate_v3_to_v4_doc_type(mem_conn):
+    """旧库 .doc 文献误记为 DOCX：迁移按后缀订正为 DOC，.docx 记录保持不变。"""
+    from data_layer.db_init import _migrate_v3_to_v4_doc_type
+
+    lit_dao = LiteratureInfoDao(mem_conn)
+    legacy_doc = _sample_lit("旧版DOC", "h-doc")
+    legacy_doc.update({
+        "literature_type": C.LIT_TYPE_DOCX, "file_path": "2026/a.doc",
+    })
+    doc_id = lit_dao.insert(legacy_doc)
+    new_docx = _sample_lit("新版DOCX", "h-docx")
+    new_docx.update({
+        "literature_type": C.LIT_TYPE_DOCX, "file_path": "2026/b.docx",
+    })
+    docx_id = lit_dao.insert(new_docx)
+
+    assert _migrate_v3_to_v4_doc_type(mem_conn) == 1
+    assert lit_dao.select_by_id(doc_id)["literature_type"] == C.LIT_TYPE_DOC
+    assert lit_dao.select_by_id(docx_id)["literature_type"] == C.LIT_TYPE_DOCX
+    # 幂等：再次执行不再订正
+    assert _migrate_v3_to_v4_doc_type(mem_conn) == 0

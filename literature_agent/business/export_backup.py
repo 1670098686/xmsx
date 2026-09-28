@@ -73,10 +73,11 @@ class ExportBackupService:
 
     def save_report_to_library(self, lit_id: int, fmt: str,
                                report_data: dict = None) -> tuple:
-        """解析完成后把报告保存到项目资料库的报告存储目录。
+        """解析完成后把报告默认保存到文献资料库（与上传的文献原件同一目录）。
 
         文件名含时间戳，同一篇文献多次保存会保留全部历史版本文件；
         同一秒内重复保存时自动追加序号，绝不覆盖旧文件。
+        用户主动"另存为"导出的报告才进入解析报告存储目录，与本方法无关。
 
         Args:
             lit_id: 文献 id。
@@ -98,7 +99,8 @@ class ExportBackupService:
 
             title = report_data.get("literature_title") or f"文献{lit_id}"
             safe_title = self._safe_filename(str(title))
-            report_dir = file_helper.ensure_dir(get_base_dir("report"))
+            # 默认保存位置：文献资料库目录（文献上传所在目录），非解析报告目录
+            report_dir = file_helper.ensure_dir(get_base_dir("literature"))
             timestamp = now_str("%Y%m%d_%H%M%S")
             base_name = f"解析报告_{safe_title}_{lit_id}_{timestamp}"
             output_path = self._unique_library_path(report_dir, base_name, suffix)
@@ -123,7 +125,7 @@ class ExportBackupService:
     def save_batch_to_library(self, lit_ids: list, fmt: str,
                               report_map: dict = None,
                               progress_callback=None) -> dict:
-        """批量把解析报告保存到资料库报告目录。
+        """批量把解析报告保存到文献资料库目录（与文献原件同目录）。
 
         Args:
             lit_ids: 文献 id 列表。

@@ -10,13 +10,35 @@ SUPPORTED_SUFFIX = {".pdf", ".txt", ".docx", ".doc"}
 LIT_TYPE_PDF = "PDF"
 LIT_TYPE_TXT = "TXT"
 LIT_TYPE_DOCX = "DOCX"
+LIT_TYPE_DOC = "DOC"
 
 SUFFIX_TO_TYPE = {
     ".pdf": LIT_TYPE_PDF,
     ".txt": LIT_TYPE_TXT,
     ".docx": LIT_TYPE_DOCX,
-    ".doc": LIT_TYPE_DOCX,
+    ".doc": LIT_TYPE_DOC,
 }
+
+# 检索页格式筛选下拉（固定顺序）与中文显示名
+LIT_TYPE_OPTIONS = (LIT_TYPE_PDF, LIT_TYPE_TXT, LIT_TYPE_DOCX, LIT_TYPE_DOC)
+LIT_TYPE_LABELS = {
+    LIT_TYPE_PDF: "PDF",
+    LIT_TYPE_TXT: "TXT",
+    LIT_TYPE_DOCX: "DOCX（新版 Word）",
+    LIT_TYPE_DOC: "DOC（旧版 Word）",
+}
+
+# ========== 检索筛选：解析状态 / 入库时间段 ==========
+# 解析状态筛选项（literature_info.is_parsed：已解析=2，其余视为未解析）
+PARSE_FILTER_ALL = "all"
+PARSE_FILTER_DONE = "done"
+PARSE_FILTER_TODO = "todo"
+# 入库时间段筛选项
+TIME_RANGE_ALL = "all"
+TIME_RANGE_OLDER_THAN_YEAR = "older_than_year"
+TIME_RANGE_THIS_YEAR = "this_year"
+TIME_RANGE_THIS_MONTH = "this_month"
+TIME_RANGE_THIS_WEEK = "this_week"
 
 # ========== 旧版 .doc 转换（本地 Word/WPS/LibreOffice，无网络上传）==========
 # 依次尝试的 Office COM ProgID（Microsoft Word → WPS 文字）
@@ -153,8 +175,6 @@ CFG_UI_STYLE = "ui_style"
 CFG_NOTE_MARK_COLOR = "note_mark_color"  # 批注标记自定义颜色（#RRGGBB）
 CFG_PARSE_DEFAULT_RULE = "parse_default_rule"
 CFG_PRECISION_DEFAULT = "precision_default"
-# 默认解析规则最近一次修改时间（UTC 字符串），用于提示旧报告重新解析
-CFG_PARSE_RULE_VERSION = "parse_rule_version"
 CFG_AUTO_SAVE_DEBOUNCE = "auto_save_debounce"
 CFG_AI_MODELS = "ai_models"
 # 阶段4：会话状态恢复（上次页面 / 管理子页 / 检索条件）
@@ -200,4 +220,71 @@ AI_FILE_PURPOSE = "file-extract"   # 文件上传用途（qwen-long/兼容接口
 AI_TIMEOUT_UPLOAD = 120            # 原件上传超时（秒，大文件）
 AI_TIMEOUT_CHAT = 180              # 模型解析响应超时（秒）
 AI_TEMPERATURE = 0.2               # 结构化解析要求稳定输出
-AI_MAX_TOKENS = 4096               # 单次响应上限
+# 单次响应上限：推理类模型（如 qwen3 系列）的思维链也占用该预算，
+# 解析长文献需输出多维度完整 JSON，4096 易把正文 JSON 截断导致解析失败，
+# 故预留思维链+正文的充足空间
+AI_MAX_TOKENS = 8192
+
+# AI 全文文本解析（不支持文件消息的模型，如 qwen-max）：
+# 全文不超过该字符数时单轮发送；超长则分块提炼后再综合，保证完整覆盖全文
+AI_INLINE_FULL_CHARS = 48000
+AI_INLINE_CHUNK_CHARS = 12000
+AI_INLINE_CHUNK_OVERLAP = 200
+AI_INLINE_MAX_CHUNKS = 20
+
+# AI 配置校验（管理中心「校验配置」按钮）：
+# 探测请求只要求模型回一句固定短文本，不涉及任何用户文献
+AI_PROBE_TIMEOUT = 60              # 探测请求超时（秒）
+AI_PROBE_MAX_TOKENS = 16           # 探测回复上限，足够返回一句话
+AI_PROBE_REPLY_PREVIEW = 80        # 结果弹窗中回显回复的最大字符数
+AI_PROBE_MAX_RETRIES = 3           # 文件探测时服务端解析等待的最大次数
+AI_PROBE_RETRY_INTERVAL = 3        # 文件探测重试间隔（秒）
+
+# 模型不支持任何"原件直传"方式时的统一友好说明（弹窗/校验结果共用）
+# 说明：file_url 方式要求 PDF 为公网可访问链接，与本系统"全程本地化、
+# 禁止把用户文献托管到公网"的约束冲突，故不采用，统一走本地全文文本通道
+AI_FILE_ID_UNSUPPORTED_HINT = (
+    "该模型不支持 PDF 原件直传（file_id 方式仅 qwen-long、Kimi/Moonshot 等"
+    "长文档模型提供；部分模型虽支持 file_url，但要求 PDF 必须是公网可访问的"
+    "链接，本软件全程本地化、不会把文献上传到公网，因此不采用该方式）。"
+    "解析文献时将自动使用本地提取的全文文本通道，文本型 PDF/Word/TXT "
+    "效果不受影响；仅扫描件、复杂表格版式等依赖服务端 OCR 的场景会有差距。"
+)
+
+# qwen3.8 系列（qwen3.8-max/flash/27b）PDF 理解通道：
+# OpenAI 兼容协议用 {"type":"file","file":{"file_data": base64, "filename": xx}}
+# 本地 PDF 直接 Base64 内联发送，不需要 /files 托管、不需要公网 URL。
+# Base64 体积约膨胀 1/3，官方提示约 150MB 文件编码后约 200MB 会超请求体上限，
+# 故本地保守限制源文件 100MB，超限改走全文文本通道
+AI_PDF_INLINE_MAX_BYTES = 100 * 1024 * 1024
+# 内联 PDF 需要随请求上传并由服务端解析，给予比普通对话更长的超时（秒）
+AI_TIMEOUT_PDF_CHAT = 300
+
+# 原件解析通道（每个模型可单独配置，支持任意兼容该协议的 PDF 模型）：
+# auto      自动识别：按模型名关键字预判；校验配置时依次实测两种通道并记录结果
+# file_id   文件托管通道：先 POST /files 上传原件取 file_id 再引用
+#           （qwen-long、Kimi/Moonshot、智谱等长文档模型）
+# file_data PDF Base64 内联通道：本地 PDF 直接 data URI 发送，无需托管/公网 URL
+#           （qwen3.8 系列及兼容该格式的多模态模型，仅支持 PDF）
+# none      仅全文文本：本地提取全文后发送（任意纯文本模型可用，最稳妥）
+AI_FILE_CHANNEL_AUTO = "auto"
+AI_FILE_CHANNEL_FILE_ID = "file_id"
+AI_FILE_CHANNEL_FILE_DATA = "file_data"
+AI_FILE_CHANNEL_NONE = "none"
+AI_FILE_CHANNELS = (
+    AI_FILE_CHANNEL_AUTO, AI_FILE_CHANNEL_FILE_ID,
+    AI_FILE_CHANNEL_FILE_DATA, AI_FILE_CHANNEL_NONE,
+)
+# 通道中文说明（UI 下拉与校验结果展示共用）
+AI_FILE_CHANNEL_LABELS = {
+    AI_FILE_CHANNEL_AUTO: "自动识别（推荐：校验时实测原件通道）",
+    AI_FILE_CHANNEL_FILE_DATA: "PDF Base64 直传（本地 PDF 内联，适合 qwen3.8 等）",
+    AI_FILE_CHANNEL_FILE_ID: "文件 ID 托管直传（qwen-long / Kimi 等）",
+    AI_FILE_CHANNEL_NONE: "仅全文文本（不直传原件，最稳妥）",
+}
+AI_FILE_CHANNEL_SHORT_LABELS = {
+    AI_FILE_CHANNEL_AUTO: "自动识别",
+    AI_FILE_CHANNEL_FILE_DATA: "PDF Base64 直传",
+    AI_FILE_CHANNEL_FILE_ID: "文件 ID 托管直传",
+    AI_FILE_CHANNEL_NONE: "仅全文文本",
+}

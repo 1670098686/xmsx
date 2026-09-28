@@ -147,11 +147,15 @@ class LiteratureInfoDao(BaseDao):
 
         Args:
             filters: 支持键：
-                keyword(str)：标题/作者/来源/笔记内容模糊匹配；
+                keyword(str)：标题/作者/来源/笔记/报告内容模糊匹配；
                 tag_id(int)：绑定了指定标签；
                 category_id(int)：所属分类；
-                literature_type(str)：文件格式；
+                literature_type(str)：文件格式（PDF/TXT/DOCX/DOC）；
                 publish_time(str)：年份，匹配发表时间前缀或入库年份；
+                is_parsed_eq(int)：仅匹配该解析状态；
+                is_parsed_neq(int)：排除该解析状态；
+                create_time_from(str)：入库时间下界（含，UTC 定长时间串）；
+                create_time_to(str)：入库时间上界（不含，UTC 定长时间串）；
                 sort_by(str)：create_time/literature_title/publish_time/file_size；
                 order(str)：desc/asc。
         Returns:
@@ -211,6 +215,26 @@ class LiteratureInfoDao(BaseDao):
                 "AND strftime('%Y', l.create_time) = ?))"
             )
             params.extend([f"{publish_time}%", publish_time])
+
+        parsed_eq = filters.get("is_parsed_eq")
+        if parsed_eq is not None:
+            where_parts.append("l.is_parsed = ?")
+            params.append(int(parsed_eq))
+        parsed_neq = filters.get("is_parsed_neq")
+        if parsed_neq is not None:
+            # 未开始/解析失败（解析中为瞬态）均归入“未解析”
+            where_parts.append("l.is_parsed <> ?")
+            params.append(int(parsed_neq))
+
+        # 入库时间范围（UTC 定长 'YYYY-MM-DD HH:MM:SS' 字符串，可直接字典序比较）
+        create_time_from = (filters.get("create_time_from") or "").strip()
+        if create_time_from:
+            where_parts.append("l.create_time >= ?")
+            params.append(create_time_from)
+        create_time_to = (filters.get("create_time_to") or "").strip()
+        if create_time_to:
+            where_parts.append("l.create_time < ?")
+            params.append(create_time_to)
 
         where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
         sort_column = self._SORT_COLUMNS.get(

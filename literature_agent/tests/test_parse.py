@@ -256,33 +256,29 @@ def test_ai_prompt_requires_sentence_dimensions_and_keyword_field():
         assert "完整语句" in line
 
 
-def test_stale_report_after_default_rule_changed(mem_conn, imported_lit):
-    """默认规则修改后，此前生成的报告应判定为过期；重新解析后恢复最新。"""
+def test_rule_change_keeps_existing_report(mem_conn, imported_lit):
+    """默认规则修改后，已有报告保持不变、仍可正常读取，不触发重新解析。"""
     parse_service = LiteratureParseService()
     assert parse_service.parse_single(imported_lit)[0] == 0
-    assert parse_service.is_report_stale(imported_lit) is False
+    report_before = LiteratureReportDao().get_by_lit_id(imported_lit)
+    assert report_before is not None
 
-    # SQLite 时间戳为秒级精度，间隔 1.2 秒保证规则版本严格晚于报告时间
-    import time
-    time.sleep(1.2)
     rule_service = ParseRuleService()
     all_dims = {key: True for key in DIMENSION_KEYS}
     assert rule_service.update_rule_detail(
         1, dimensions=all_dims, precision=4
     )[0] == 0
-    assert parse_service.is_report_stale(imported_lit) is True
-    assert imported_lit in parse_service.list_parsed_lit_ids()
 
-    # 修改非默认规则不影响过期判定
-    code, other_id, _ = rule_service.create_rule("另一条规则", "自定义", all_dims)
-    assert code == 0
-    rule_service.update_rule_detail(other_id, precision=2)
-    assert parse_service.is_report_stale(imported_lit) is True
+    # 改规则不写任何规则版本戳，旧报告原样保留
+    assert SystemConfigDao().get("parse_rule_version", "") == ""
+    report_after = LiteratureReportDao().get_by_lit_id(imported_lit)
+    assert report_after == report_before
 
-    # 重新解析后报告时间更新，不再提示过期
-    time.sleep(1.2)
+    # 报告仍可正常读取，文献仍标记为已解析；手动重新解析不受影响
+    assert parse_service.get_report(imported_lit) is not None
+    assert LiteratureInfoDao().select_by_id(imported_lit)["is_parsed"] == C.PARSE_DONE
     assert parse_service.reparse(imported_lit)[0] == 0
-    assert parse_service.is_report_stale(imported_lit) is False
+    assert LiteratureInfoDao().select_by_id(imported_lit)["is_parsed"] == C.PARSE_DONE
 
 
 def test_parse_batch(mem_conn, tmp_path):
@@ -330,3 +326,108 @@ def test_export_generator_bad_format(tmp_path):
     with pytest.raises(Exception):
         export_generator.export_report({"literature_title": "x"},
                                        str(tmp_path / "x.md"), "md")
+
+
+def test_default_rule_dimension_filters_view_and_export(
+        mem_conn, imported_lit, tmp_path):
+    """默认规则停用维度：报告视图与 TXT 导出均隐藏该章节；库内原文保留，
+    重新勾选后旧报告内容恢复显示（无需重新解析）。"""
+    parse_service = LiteratureParseService()
+    assert parse_service.parse_single(imported_lit)[0] == 0
+    rule_service = ParseRuleService()
+    default_id = rule_service.get_default_rule_id()
+    assert rule_service.get_default_dimensions()["innovation_point"] is True
+    assert parse_service.get_report(imported_lit)["innovation_point"]
+
+    dims = {key: True for key in DIMENSION_KEYS}
+    dims["innovation_point"] = False
+    code, _d, msg = rule_service.update_rule_detail(default_id, dimensions=dims)
+    assert code == 0, msg
+    assert rule_service.get_default_dimensions()["innovation_point"] is False
+
+    # 视图层隐藏，数据库原文保留
+    assert parse_service.get_report(imported_lit)["innovation_point"] == ""
+    assert LiteratureReportDao().get_by_lit_id(imported_lit)["innovation_point"]
+
+    # TXT 导出不含停用章节
+    txt_path = str(tmp_path / "hidden.txt")
+    code, _out, msg = ExportBackupService().export_report(
+        imported_lit, "txt", txt_path
+    )
+    assert code == 0, msg
+    assert "四、创新点" not in tmp_path.joinpath("hidden.txt").read_text(
+        encoding="utf-8"
+    )
+
+    # 重新勾选：旧报告内容原样恢复
+    dims["innovation_point"] = True
+    assert rule_service.update_rule_detail(
+        default_id, dimensions=dims
+    )[0] == 0
+    assert parse_service.get_report(imported_lit)["innovation_point"]
+    txt_path2 = str(tmp_path / "shown.txt")
+    assert ExportBackupService().export_report(
+        imported_lit, "txt", txt_path2
+    )[0] == 0
+    assert "四、创新点" in tmp_path.joinpath("shown.txt").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_clear_report_keeps_literature_and_resets_status(mem_conn, imported_lit):
+    """删除解析报告：报告清空、状态回未解析，文献保留且可重新解析。"""
+    from data_layer.dao.log_dao import OperationLogDao
+    from data_layer.dao.note_dao import LiteratureNoteDao
+
+    service = LiteratureParseService()
+    assert service.parse_single(imported_lit)[0] == 0
+    lit_dao = LiteratureInfoDao()
+    assert lit_dao.select_by_id(imported_lit)["is_parsed"] == C.PARSE_DONE
+    assert LiteratureReportDao().get_by_lit_id(imported_lit)
+
+    # 附带一条笔记，验证删除报告不影响笔记批注
+    note_id = LiteratureNoteDao().insert({
+        "literature_id": imported_lit,
+        "paragraph_pos": "txh:0-10",
+        "note_content": "删报告不应删笔记",
+        "note_type": "paragraph",
+        "highlight_style": "highlight",
+    })
+
+    code, _data, msg = service.clear_report(imported_lit)
+    assert code == C.CODE_SUCCESS, msg
+    # 文献记录保留、状态回到未解析
+    lit = lit_dao.select_by_id(imported_lit)
+    assert lit is not None
+    assert lit["is_parsed"] == C.PARSE_NOT_STARTED
+    # 报告已清空，get_report 回到 None
+    assert LiteratureReportDao().get_by_lit_id(imported_lit) is None
+    assert service.get_report(imported_lit) is None
+    # 笔记保留
+    assert LiteratureNoteDao().get_by_id(note_id)["note_content"] == "删报告不应删笔记"
+    # 操作日志记录
+    logs = OperationLogDao().get_recent(limit=5)
+    assert any("删除解析报告" in (row.get("operate_content") or "")
+               for row in logs)
+
+    # 可立即重新解析
+    code, _report, msg = service.parse_single(imported_lit)
+    assert code == C.CODE_SUCCESS, msg
+    assert lit_dao.select_by_id(imported_lit)["is_parsed"] == C.PARSE_DONE
+
+
+def test_clear_report_without_report_returns_error(mem_conn, imported_lit):
+    """未解析文献没有报告：删除返回业务错误且不误改文献状态。"""
+    service = LiteratureParseService()
+    code, _data, msg = service.clear_report(imported_lit)
+    assert code != C.CODE_SUCCESS
+    assert "暂无解析报告" in msg
+    assert (LiteratureInfoDao().select_by_id(imported_lit)["is_parsed"]
+            == C.PARSE_NOT_STARTED)
+
+
+def test_clear_report_missing_literature(mem_conn):
+    """文献不存在：返回文件未找到错误码。"""
+    code, _data, msg = LiteratureParseService().clear_report(999999)
+    assert code == C.CODE_FILE_NOT_FOUND
+    assert msg

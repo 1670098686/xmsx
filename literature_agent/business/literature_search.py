@@ -1,9 +1,11 @@
 """分类检索业务：全文模糊检索、标签/分类/时间/格式组合筛选、批量操作。"""
 import re
+from datetime import date, datetime, timedelta
 
 from config import constants as C
 from data_layer.dao.lit_info_dao import LiteratureInfoDao
 from data_layer.dao.lit_tag_dao import LiteratureTagDao
+from data_layer.dao.report_dao import LiteratureReportDao
 from data_layer.dao.tag_dao import CategoryTagDao
 from data_layer.db_connect import DatabaseManager
 from utils.logger import get_logger
@@ -16,6 +18,49 @@ logger = get_logger()
 # 合法四位年份（发表时间/入库时间提取用）
 _YEAR_PATTERN = re.compile(r"^(\d{4})")
 
+# 一年以前的回溯天数（滚动一周年）
+_ONE_YEAR_DAYS = 365
+_TIME_TEXT_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _local_to_utc_text(local_dt: datetime) -> str:
+    """把本地时区的朴素日期时间换算为 UTC 定长字符串（create_time 同格式）。"""
+    utc_offset = datetime.now().astimezone().utcoffset()
+    return (local_dt - utc_offset).strftime(_TIME_TEXT_FORMAT)
+
+
+def _resolve_time_range_bounds(range_key: str,
+                               today: date = None) -> tuple:
+    """计算入库时间段的 UTC 闭开区间边界。
+
+    Args:
+        range_key: constants.TIME_RANGE_* 之一。
+        today: 可选“今天”（本地日期），默认取系统当前日期，测试可注入。
+    Returns:
+        (start_utc, end_utc)：闭开区间，None 表示该侧不限；
+        全部时间或无法识别的选项返回 None。
+    """
+    if range_key == C.TIME_RANGE_ALL:
+        return None
+    today = today or date.today()
+    if range_key == C.TIME_RANGE_THIS_WEEK:
+        # 周一为一周起点
+        start = datetime.combine(
+            today - timedelta(days=today.weekday()), datetime.min.time()
+        )
+        return _local_to_utc_text(start), None
+    if range_key == C.TIME_RANGE_THIS_MONTH:
+        start = datetime.combine(today.replace(day=1), datetime.min.time())
+        return _local_to_utc_text(start), None
+    if range_key == C.TIME_RANGE_THIS_YEAR:
+        start = datetime.combine(today.replace(month=1, day=1),
+                                 datetime.min.time())
+        return _local_to_utc_text(start), None
+    if range_key == C.TIME_RANGE_OLDER_THAN_YEAR:
+        end = datetime.now() - timedelta(days=_ONE_YEAR_DAYS)
+        return None, _local_to_utc_text(end)
+    return None
+
 
 class LiteratureSearchService:
     """文献检索业务服务。"""
@@ -25,6 +70,7 @@ class LiteratureSearchService:
         self.lit_dao = LiteratureInfoDao()
         self.tag_dao = CategoryTagDao()
         self.lit_tag_dao = LiteratureTagDao()
+        self.report_dao = LiteratureReportDao()
         self._import_service = LiteratureImportService()
 
     # ================= 检索 =================
@@ -43,21 +89,51 @@ class LiteratureSearchService:
             return exception_to_code(exc), [], getattr(exc, "message", str(exc))
 
     def full_text_search(self, keyword: str, filters: dict = None) -> tuple:
-        """全文模糊检索（标题/作者/来源/笔记内容）+ 组合条件。
+        """全文模糊检索（标题/作者/来源/笔记/报告内容）+ 组合条件。
 
         Args:
             keyword: 关键词（可为空）。
-            filters: tag_id/category_id/literature_type/publish_time/sort_by/order。
+            filters: tag_id/category_id/literature_type/publish_time/
+                parsed_status(all/done/todo)/time_range(all/older_than_year/
+                this_year/this_month/this_week)/sort_by/order。
         Returns:
             (code, [lit_dict,...], msg)
         """
         try:
             query = dict(filters or {})
             query["keyword"] = keyword or ""
+            self._apply_parsed_status(query)
+            self._apply_time_range(query)
             rows = self.lit_dao.search(query)
             return C.CODE_SUCCESS, self._attach_tags(rows), ""
         except Exception as exc:
             return exception_to_code(exc), [], getattr(exc, "message", str(exc))
+
+    @staticmethod
+    def _apply_parsed_status(query: dict) -> None:
+        """把 UI 的解析状态选项翻译为 DAO 状态条件（原地写入并移除原键）。"""
+        status = query.pop("parsed_status", C.PARSE_FILTER_ALL)
+        if status == C.PARSE_FILTER_DONE:
+            query["is_parsed_eq"] = C.PARSE_DONE
+        elif status == C.PARSE_FILTER_TODO:
+            query["is_parsed_neq"] = C.PARSE_DONE
+
+    @staticmethod
+    def _apply_time_range(query: dict) -> None:
+        """把入库时间段选项翻译为 create_time 闭开区间（原地写入并移除原键）。
+
+        create_time 以 UTC 定长字符串存储（CURRENT_TIMESTAMP），边界按用户
+        本地自然日计算后换算为 UTC，字符串可直接字典序比较。
+        """
+        range_key = query.pop("time_range", C.TIME_RANGE_ALL)
+        bounds = _resolve_time_range_bounds(range_key)
+        if bounds is None:
+            return
+        start_utc, end_utc = bounds
+        if start_utc:
+            query["create_time_from"] = start_utc
+        if end_utc:
+            query["create_time_to"] = end_utc
 
     def filter_by_category(self, category_id: int) -> tuple:
         """按分类筛选。
@@ -184,8 +260,28 @@ class LiteratureSearchService:
 
     # ================= 删除/归类/绑定 =================
 
+    def get_lit_ids_with_report(self, lit_ids: list) -> list:
+        """返回给定文献中数据库里已存有解析报告的文献 id。
+
+        供删除前确认弹窗统计“将一并删除多少份解析报告”。
+
+        Args:
+            lit_ids: 待判定的文献 id 列表。
+        Returns:
+            存在解析报告的文献 id 列表（去重，保持入参顺序）。
+        """
+        try:
+            return self.report_dao.select_lit_ids_with_report(lit_ids or [])
+        except Exception as exc:
+            logger.warning("查询文献解析报告存在性失败：%s", exc)
+            return []
+
     def delete_literature(self, lit_id: int) -> tuple:
-        """删除单篇（委托导入服务，保证级联与日志一致）。"""
+        """删除单篇（委托导入服务，保证级联与日志一致）。
+
+        数据库中的解析报告、笔记由外键 ON DELETE CASCADE 随文献一并清除；
+        调用方（UI）必须先完成“是否一并删除解析报告”的二次确认。
+        """
         return self._import_service.delete_literature(lit_id)
 
     def batch_delete(self, lit_ids: list) -> tuple:

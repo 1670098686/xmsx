@@ -58,14 +58,14 @@ def test_export_report_txt(mem_conn, storage, tmp_path):
 
 
 def test_save_report_to_library_location_and_history(mem_conn, storage):
-    """报告保存到资料库报告目录；同秒重复保存保留历史版本不覆盖。"""
+    """报告默认保存到文献资料库（与原件同目录）；同秒重复保存保留历史版本不覆盖。"""
     import time
     import tempfile
     from pathlib import Path
     from business.literature_parse import LiteratureParseService
     tmp_path = Path(tempfile.mkdtemp())
     lit = _import_one(tmp_path)
-    _lit_dir, _backup_dir, report_dir = storage
+    lit_dir, _backup_dir, _report_dir = storage
     code, report, msg = LiteratureParseService().parse_single(lit["id"])
     assert code == C.CODE_SUCCESS, msg
 
@@ -78,7 +78,8 @@ def test_save_report_to_library_location_and_history(mem_conn, storage):
         """归一化路径（解析 8.3 短路径、统一大小写）后比较。"""
         return os.path.normcase(os.path.realpath(value))
 
-    assert norm_path(os.path.dirname(path1)) == norm_path(report_dir)
+    # 默认保存位置是文献资料库目录（上传的 paper.txt 也在其中），不是报告目录
+    assert norm_path(os.path.dirname(path1)) == norm_path(lit_dir)
     assert path1.endswith(".txt")
     assert os.path.isfile(path1)
 
@@ -97,7 +98,8 @@ def test_save_report_to_library_location_and_history(mem_conn, storage):
     )
     assert code == C.CODE_SUCCESS, msg
     assert path3.endswith(".pdf") and path3 != path2
-    assert len([n for n in os.listdir(report_dir)]) == 3
+    # 文献资料库内：1 个原件 paper.txt + 3 个报告文件
+    assert len(os.listdir(lit_dir)) == 4
 
 
 def test_save_report_to_library_keeps_keywords(mem_conn, storage):
@@ -111,7 +113,6 @@ def test_save_report_to_library_keeps_keywords(mem_conn, storage):
     assert code == C.CODE_SUCCESS, msg
     assert report.get("keywords"), "解析报告应携带关键词附加信息"
 
-    _lit_dir, _backup_dir, report_dir = storage
     service = ExportBackupService()
     code, path, msg = service.save_report_to_library(
         lit["id"], "txt", report_data=report
@@ -149,7 +150,7 @@ def test_save_batch_to_library(mem_conn, storage):
     assert parse_service.parse_single(lit1["id"])[0] == C.CODE_SUCCESS
     assert parse_service.parse_single(lit2["id"])[0] == C.CODE_SUCCESS
 
-    _lit_dir, _backup_dir, report_dir = storage
+    lit_dir, _backup_dir, _report_dir = storage
     progress = []
     result = ExportBackupService().save_batch_to_library(
         [lit1["id"], lit2["id"]], "word",
@@ -159,7 +160,8 @@ def test_save_batch_to_library(mem_conn, storage):
     assert len(result["success"]) == 2
     assert all(os.path.isfile(p) and p.endswith(".docx") for p in result["success"])
     assert progress and progress[-1] == 100
-    assert len(os.listdir(report_dir)) == 2
+    # 报告与文献原件同目录：2 个原件（p1/p2.txt）+ 2 个 docx 报告
+    assert len(os.listdir(lit_dir)) == 4
 
 
 def test_full_backup_creates_zip_with_db_and_files(mem_conn, storage, tmp_path):

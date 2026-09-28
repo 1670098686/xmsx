@@ -271,6 +271,14 @@ QLabel#categoryLabel {
     font-size: 12px;
     font-weight: bold;
 }
+QLabel#parsedLabel {
+    background-color: %(success)s;
+    color: #FFFFFF;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 12px;
+    font-weight: bold;
+}
 
 /* ---------- 进度条 ---------- */
 QProgressBar {

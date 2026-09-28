@@ -283,6 +283,9 @@ class SystemService:
                 "base_url": model.get("base_url", ""),
                 "api_key": api_key,
                 "is_current": bool(model.get("is_current")),
+                # 老配置无该字段时默认自动识别
+                "file_channel": model.get("file_channel")
+                or C.AI_FILE_CHANNEL_AUTO,
             })
         return result
 
@@ -311,6 +314,7 @@ class SystemService:
             "base_url": (base_url or "").strip(),
             "api_key": self._encrypt_key(api_key or ""),
             "is_current": not models,  # 首个模型自动选中
+            "file_channel": C.AI_FILE_CHANNEL_AUTO,
         }
         models.append(entry)
         code, _data, msg = self._write_ai_models(models, f"新增 AI 模型：{model_name}")
@@ -341,14 +345,16 @@ class SystemService:
         return self._write_ai_models(models, f"切换当前 AI 模型：{model_name}")
 
     def set_ai_key(self, model_name: str, api_key: str = None,
-                   base_url: str = None) -> tuple:
-        """更新指定模型的 API 密钥（加密落库），可选同时更新 base_url。
+                   base_url: str = None, file_channel: str = None) -> tuple:
+        """更新指定模型的 API 密钥（加密落库），可选同时更新地址/原件通道。
 
         Args:
             model_name: 模型名称。
             api_key: 明文密钥；传 None 表示本次不修改密钥（仅更新地址），
                      传空串表示显式清空密钥。
             base_url: 接口地址；None 表示不修改。
+            file_channel: 原件解析通道（auto/file_id/file_data/none）；
+                          None 表示不修改。
         Returns:
             (code, data, msg)。
         """
@@ -360,7 +366,108 @@ class SystemService:
             target["api_key"] = self._encrypt_key(api_key)
         if base_url is not None:
             target["base_url"] = base_url.strip()
-        return self._write_ai_models(models, f"更新 AI 模型密钥：{model_name}")
+        if file_channel is not None:
+            if file_channel not in C.AI_FILE_CHANNELS:
+                return C.CODE_FILE_INVALID, None, "不支持的原件解析通道"
+            target["file_channel"] = file_channel
+        return self._write_ai_models(models, f"更新 AI 模型配置：{model_name}")
+
+    # ================= AI 配置校验 =================
+
+    def validate_ai_config(self, model_name: str = None, base_url: str = None,
+                           api_key: str = None,
+                           file_channel: str = None) -> tuple:
+        """校验一份 AI 配置（可用于未保存的表单草稿，不落库、不写日志）。
+
+        依次检测三项：
+        1. 接口地址/密钥能否正常连通并通过鉴权（最小对话探测）；
+        2. 模型输出能否正确返回非空文本（回显一句样例回复）；
+        3. 模型能否直读 PDF 原件（内置微型 PDF，按所选通道实测）。
+        探测全程只发送测试语句与内置测试文件，不接触任何用户文献。
+
+        Args:
+            model_name: 模型名称（作为 model 参数发送）。
+            base_url: 接口根地址。
+            api_key: 明文密钥；为空时尝试按模型名读取已保存密钥。
+            file_channel: 表单选择的原件通道（auto/file_id/file_data/none）；
+                          None 时按自动识别处理。
+        Returns:
+            (code, result_dict, msg)：对话探测通过即 code=0
+            （PDF 直读不通过不影响可用性结论，仅提示走全文文本模式）。
+            result["detected_channel"] 为实测可用的通道，供界面回填配置。
+        """
+        from tool_layer import ai_client
+        from utils.exceptions import AIServiceError
+
+        name = (model_name or "").strip()
+        url = (base_url or "").strip()
+        key = (api_key or "").strip()
+        channel = file_channel or C.AI_FILE_CHANNEL_AUTO
+        if channel not in C.AI_FILE_CHANNELS:
+            channel = C.AI_FILE_CHANNEL_AUTO
+        result = {
+            "name": name,
+            "base_url": url,
+            "chat_ok": False,
+            "chat_reply": "",
+            "chat_error": "",
+            "file_ok": None,
+            "file_reply": "",
+            "file_error": "",
+            "file_channel": channel,
+            "detected_channel": "",
+            "name_hint_file": ai_client.model_supports_file(name, url),
+        }
+        if not name:
+            return C.CODE_FILE_INVALID, result, "模型名称不能为空"
+        if not url:
+            return C.CODE_FILE_INVALID, result, "接口地址不能为空"
+        if not url.lower().startswith(("http://", "https://")):
+            return C.CODE_FILE_INVALID, result, "接口地址需以 http:// 或 https:// 开头"
+        if not key:
+            stored = next(
+                (m for m in self.list_ai_models(decrypt=True)
+                 if m["name"] == name), None,
+            )
+            key = (stored or {}).get("api_key", "")
+            if not key or key.startswith("[密钥无法解密"):
+                return C.CODE_FILE_INVALID, result, "API 密钥为空或无法解密，请重新填写"
+
+        # 1+2：连通/鉴权与正常输出
+        try:
+            reply = ai_client.probe_chat(url, key, name)
+            result["chat_ok"] = True
+            result["chat_reply"] = reply[:C.AI_PROBE_REPLY_PREVIEW]
+        except AIServiceError as exc:
+            result["chat_error"] = exc.message
+            return C.CODE_AI_SERVICE, result, exc.message
+        except Exception as exc:  # 探测兜底：不向 UI 抛原始堆栈
+            message = f"校验请求发生异常：{exc}"
+            result["chat_error"] = message
+            logger.error("AI 配置校验异常：%s", exc, exc_info=True)
+            return C.CODE_AI_SERVICE, result, message
+
+        # 3：PDF 原件直读能力（失败只是不支持该通道，配置整体仍可用）
+        # 用户选择“仅全文文本”时不发送任何文件探测请求
+        if channel == C.AI_FILE_CHANNEL_NONE:
+            result["file_ok"] = False
+            result["file_error"] = "已选择仅使用全文文本通道，未进行原件直读探测。"
+        else:
+            try:
+                file_reply, used_channel = ai_client.probe_file_parsing(
+                    url, key, name, mode=channel,
+                )
+                result["file_ok"] = True
+                result["file_reply"] = file_reply[:C.AI_PROBE_REPLY_PREVIEW]
+                result["detected_channel"] = used_channel
+            except AIServiceError as exc:
+                result["file_ok"] = False
+                result["file_error"] = exc.message
+            except Exception as exc:
+                result["file_ok"] = False
+                result["file_error"] = f"文件探测发生异常：{exc}"
+                logger.error("AI 文件能力校验异常：%s", exc, exc_info=True)
+        return C.CODE_SUCCESS, result, "校验完成"
 
     # ================= AI 加解密内部实现 =================
 

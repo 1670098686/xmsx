@@ -163,6 +163,40 @@ def safe_move(src: str, dst: str) -> None:
         raise PermissionDeniedError(f"文件移动失败：{exc}") from exc
 
 
+def safe_delete_file(file_path: str, base_dir: str = None) -> bool:
+    """安全删除受管存储目录内的单个文件（仅删文件，不删任何目录）。
+
+    Args:
+        file_path: 文件绝对路径（或相对 base_dir 的库内相对路径）。
+        base_dir: 受管存储基准目录；提供时强制做目录穿越校验，
+                  解析结果逃逸出该目录一律拒绝删除。
+    Returns:
+        True 表示文件被实际删除；False 表示文件本就不存在（视为删除成功）。
+    Raises:
+        FileInvalidError: 路径为空、逃逸基准目录或目标是目录。
+        PermissionDeniedError: 文件被占用或无删除权限。
+    """
+    if not file_path:
+        raise FileInvalidError("路径为空")
+    target = sanitize_path(file_path, base_dir) if base_dir \
+        else os.path.realpath(file_path)
+    if not os.path.lexists(target):
+        return False
+    if os.path.isdir(target):
+        # 只允许删除文件，杜绝误删存储目录或其子目录
+        raise FileInvalidError(f"拒绝删除目录：{target}")
+    try:
+        os.remove(target)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise PermissionDeniedError(
+            f"文件删除失败（可能正被其他程序占用）：{exc}"
+        ) from exc
+    logger.info("文件已删除：%s", target)
+    return True
+
+
 def get_disk_usage(path: str = None) -> dict:
     """获取指定路径所在磁盘的占用情况。
 

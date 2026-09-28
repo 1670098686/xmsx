@@ -1,0 +1,29 @@
+# ===== Python 运行缓存（禁止提交） =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ===== 本地运行数据 / 密钥（全程本地化，严禁上传） =====
+# 数据库与 Fernet 密钥默认存放在用户目录 ~/.literature_agent/，
+# 此处同时忽略仓库内可能出现的同名文件，防止自定义路径时误提交
+*.db
+*.sqlite
+*.sqlite3
+.secret_key
+*.secret_key
+
+# ===== 程序运行输出（保留目录占位） =====
+literature_agent/output/*
+!literature_agent/output/.gitkeep
+
+# ===== 日志、临时文件与本地备份 =====
+*.log
+_tmp_*
+*.bak_*
+
+# ===== 系统/编辑器杂项 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

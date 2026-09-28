@@ -4,8 +4,9 @@
 阶段4新增：Ctrl+S/Ctrl+E 全局快捷键、关闭后恢复上次页面与检索条件。
 """
 import json
+import sys
 
-from PyQt5.QtCore import Qt, QEvent, QTimer
+from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QShortcut,
@@ -45,6 +46,72 @@ _SETTING_MODULES = {
 }
 
 
+# Win32：WM_MOUSEACTIVATE 消息号与“激活但吞掉首击”的返回值
+_WM_MOUSEACTIVATE = 0x0021
+_MA_ACTIVATEANDEAT = 4
+_WINDOWS_NATIVE_EVENT = b"windows_generic_MSG"
+
+
+if sys.platform.startswith("win"):
+    import ctypes
+    import ctypes.wintypes
+
+    from PyQt5.QtCore import QAbstractNativeEventFilter
+
+    class WindowsActivationClickFilter(QAbstractNativeEventFilter):
+        """拦截 WM_MOUSEACTIVATE，让点击非活动窗口只激活、不投递首击。"""
+
+        def nativeEventFilter(self, event_type, message):
+            """处理原生窗口消息。
+
+            Args:
+                event_type: Qt 原生事件类型字节串。
+                message: 指向原生消息结构的指针（Windows 为 MSG）。
+            Returns:
+                (是否已处理, 窗口过程返回值)。
+            """
+            if bytes(event_type) != _WINDOWS_NATIVE_EVENT:
+                return False, 0
+            try:
+                address = int(message)
+            except (TypeError, ValueError):
+                return False, 0
+            # 空指针/无效用户态地址不得解引用，直接放行交由 Qt 处理
+            if address < 0x10000:
+                return False, 0
+            try:
+                msg = ctypes.wintypes.MSG.from_address(address)
+            except (TypeError, ValueError):
+                return False, 0
+            if msg.message == _WM_MOUSEACTIVATE:
+                return True, _MA_ACTIVATEANDEAT
+            return False, 0
+
+
+def install_activation_click_filter(app) -> bool:
+    """安装 Windows 原生事件过滤器：点击非活动窗口只激活、不触发控件。
+
+    Windows 默认行为下，点击非活动窗口的那一下会同时下发给被点中的控件
+    （MA_ACTIVATE），用户从其他软件切回时极易误触侧边栏导致页面被切换。
+    在系统层拦截 WM_MOUSEACTIVATE 并返回 MA_ACTIVATEANDEAT，让首击只负责
+    激活窗口、不投递给任何控件——不依赖 Qt 事件到达顺序，也没有时间窗误伤
+    正常点击的问题。该消息仅在窗口非活动时收到，已活动窗口不受影响。
+
+    Args:
+        app: QApplication 实例。
+    Returns:
+        True 表示过滤器安装成功；非 Windows 平台或安装失败返回 False。
+    """
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        app.installNativeEventFilter(WindowsActivationClickFilter())
+        return True
+    except Exception:
+        get_logger().warning("安装激活首击过滤器失败", exc_info=True)
+        return False
+
+
 class MainWindow(QMainWindow):
     """应用主窗口（无边框 + 自定义标题栏）。"""
 
@@ -58,14 +125,8 @@ class MainWindow(QMainWindow):
 
         self._drag_pos = None
         self._restoring = False
-        # 窗口被其他软件遮挡后，用户点回本窗口的那一下「激活点击」在 Windows 上
-        # 会同时投递给控件，若落点恰好在侧边栏就会意外切换页面。
-        # 该标志用于吞掉窗口重新激活后短时间内的第一次侧边栏点击。
-        self._activate_click_guard = False
-        self._first_activate = True
         self._build_ui()
         self._register_shortcuts()
-        self._install_sidebar_guard()
         self._restore_last_session()
 
     # ================= UI 构建 =================
@@ -195,10 +256,6 @@ class MainWindow(QMainWindow):
         self.page_import.go_library_requested.connect(
             lambda: self._switch_page(PAGE_SEARCH)
         )
-        # 默认解析规则保存后，用户确认立即重解析 → 跳解析页执行批量重新解析
-        self.page_setting.page_rules.reparse_requested.connect(
-            self._reparse_with_latest_rule
-        )
 
         layout.addWidget(self.stack)
 
@@ -218,37 +275,6 @@ class MainWindow(QMainWindow):
         shortcut_save.activated.connect(self._on_shortcut_save)
         shortcut_export = QShortcut(QKeySequence("Ctrl+E"), self)
         shortcut_export.activated.connect(self._on_shortcut_export)
-
-    def _install_sidebar_guard(self) -> None:
-        """在侧边栏全部可点击控件上安装事件过滤器，用于吞掉窗口激活首击。
-
-        覆盖主导航列表（含 viewport）与管理中心折叠菜单（header 与 5 个子项）。
-        """
-        targets = [self.nav_list, self.nav_list.viewport(),
-                   self.fold_menu, self.fold_menu._header]
-        targets.extend(self.fold_menu._buttons.values())
-        for widget in targets:
-            widget.installEventFilter(self)
-
-    def changeEvent(self, event) -> None:
-        """窗口重新激活时打开「首击保护」，150ms 后自动解除。
-
-        Windows 行为：点击一个非激活窗口将其激活时，这一下点击会同时下发给
-        被点中的控件；用户从其他软件切回时极易误触侧边栏导致页面被切换。
-        保护只覆盖激活后极短时间窗：真实鼠标激活点击与激活同帧到达（<16ms），
-        而 Alt+Tab/任务栏激活后用户的正常点击通常晚于 150ms，不受影响。
-        """
-        if event.type() == QEvent.WindowActivate:
-            if self._first_activate:
-                self._first_activate = False
-            else:
-                self._activate_click_guard = True
-                QTimer.singleShot(150, self._release_activate_guard)
-        super().changeEvent(event)
-
-    def _release_activate_guard(self) -> None:
-        """超时解除首击保护（任务栏/Alt+Tab 激活后无点击的场景）。"""
-        self._activate_click_guard = False
 
     def _on_shortcut_save(self) -> None:
         """Ctrl+S：仅笔记批注页响应，立即落库防抖笔记。"""
@@ -277,14 +303,9 @@ class MainWindow(QMainWindow):
             refresh()
 
     def _goto_parse(self, lit_id: int) -> None:
-        """检索页卡片“解析”：跳解析页并选中该文献。"""
+        """检索页卡片“解析/查看报告”：跳解析页并选中该文献。"""
         self._switch_page(PAGE_PARSE)
         self.page_parse.select_literature(lit_id)
-
-    def _reparse_with_latest_rule(self) -> None:
-        """保存默认规则后用户确认重解析：跳解析页并批量重新解析全部已解析文献。"""
-        self._switch_page(PAGE_PARSE)
-        self.page_parse.start_batch_reparse()
 
     def closeEvent(self, event) -> None:
         """关闭窗口前落库全部防抖笔记并持久化会话状态。"""
@@ -394,15 +415,8 @@ class MainWindow(QMainWindow):
     # ================= 无边框窗口拖动 =================
 
     def eventFilter(self, obj, event):
-        """顶部导航栏按住拖动窗口（双击最大化/还原），并吞掉窗口激活首击。"""
+        """顶部导航栏按住拖动窗口（双击最大化/还原）。"""
         from PyQt5.QtCore import QEvent
-        # 激活首击保护：按下（含双击）与配套松开都吞掉，避免按钮半选状态
-        if self._activate_click_guard:
-            if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick):
-                return True
-            if event.type() == QEvent.MouseButtonRelease:
-                self._activate_click_guard = False
-                return True
         if obj.objectName() == "appHeader":
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 if self.isMaximized():

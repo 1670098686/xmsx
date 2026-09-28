@@ -1,12 +1,17 @@
 """阶段2 B2-9：分类检索业务单元测试。"""
+from datetime import date, datetime, timedelta, timezone
+
 import pytest
 
 from business.literature_import import LiteratureImportService
 from business.literature_search import LiteratureSearchService
 from business.note_manage import NoteManageService
+import business.literature_search as search_module
 from config import constants as C
 from data_layer.dao.config_dao import SystemConfigDao
+from data_layer.dao.lit_info_dao import LiteratureInfoDao
 from data_layer.dao.tag_dao import CategoryTagDao
+from data_layer.db_connect import DatabaseManager
 
 
 def _import_one(tmp_path, filename, title, content):
@@ -153,6 +158,29 @@ def test_batch_delete(mem_conn, library):
     assert len(rows) == 1
 
 
+def test_get_lit_ids_with_report(mem_conn, library):
+    """删除前预览：仅返回数据库中已存有解析报告的文献 id。"""
+    from business.literature_parse import LiteratureParseService
+    from data_layer.dao.report_dao import LiteratureReportDao
+
+    service = LiteratureSearchService()
+    all_ids = [library["dl"], library["nlp"], library["bio"]]
+    assert service.get_lit_ids_with_report(all_ids) == []
+    assert service.get_lit_ids_with_report([]) == []
+
+    assert LiteratureParseService().parse_single(library["bio"])[0] == 0
+    assert service.get_lit_ids_with_report(all_ids) == [library["bio"]]
+    # 重复 id 去重并保持入参顺序
+    assert service.get_lit_ids_with_report(
+        [library["bio"], library["dl"], library["bio"]]
+    ) == [library["bio"]]
+
+    # 文献删除后报告随级联清除
+    service.delete_literature(library["bio"])
+    assert LiteratureReportDao().get_by_lit_id(library["bio"]) is None
+    assert service.get_lit_ids_with_report(all_ids) == []
+
+
 def test_filter_options(mem_conn, library):
     options = LiteratureSearchService().get_filter_options()
     assert "2025" in options["years"]
@@ -249,3 +277,129 @@ def test_attach_tags_hides_category_duplicate(mem_conn, library):
     code, rows, _ = service.get_all_literature()
     row_nlp = next(r for r in rows if r["id"] == library["nlp"])
     assert row_nlp["category"] is None
+
+
+# ================= 解析状态 / 入库时间段 / DOC 格式筛选 =================
+
+def test_filter_by_parsed_status(mem_conn, library):
+    """已解析/未解析分类筛选：按 is_parsed 是否等于 PARSE_DONE 划分。"""
+    from business.literature_parse import LiteratureParseService
+
+    assert LiteratureParseService().parse_single(library["bio"])[0] == 0
+    service = LiteratureSearchService()
+
+    code, rows, _ = service.full_text_search(
+        "", {"parsed_status": C.PARSE_FILTER_DONE}
+    )
+    assert [r["id"] for r in rows] == [library["bio"]]
+
+    code, rows, _ = service.full_text_search(
+        "", {"parsed_status": C.PARSE_FILTER_TODO}
+    )
+    assert {r["id"] for r in rows} == {library["dl"], library["nlp"]}
+
+    # all 与缺省等价，返回全部
+    code, rows_all, _ = service.full_text_search(
+        "", {"parsed_status": C.PARSE_FILTER_ALL}
+    )
+    assert len(rows_all) == 3
+
+
+def test_filter_doc_type_distinct_from_docx(mem_conn, library):
+    """DOC 与 DOCX 为独立格式筛选值，互不串档。"""
+    LiteratureInfoDao().update_by_id(
+        library["bio"], {"literature_type": C.LIT_TYPE_DOC}
+    )
+    service = LiteratureSearchService()
+
+    code, rows, _ = service.full_text_search(
+        "", {"literature_type": C.LIT_TYPE_DOC}
+    )
+    assert [r["id"] for r in rows] == [library["bio"]]
+
+    code, rows, _ = service.full_text_search(
+        "", {"literature_type": C.LIT_TYPE_DOCX}
+    )
+    assert rows == []
+
+
+def test_filter_by_time_range(mem_conn, library):
+    """入库时间段：400 天前的文献只命中“一年以前”，不命中“今年/本月/本周”。"""
+    conn = DatabaseManager().get_conn()
+    old_text = (
+        datetime.now(timezone.utc) - timedelta(days=400)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "UPDATE literature_info SET create_time = ? WHERE id = ?",
+        (old_text, library["bio"]),
+    )
+    conn.commit()
+
+    service = LiteratureSearchService()
+    recent_ids = {library["dl"], library["nlp"]}
+
+    code, rows, _ = service.full_text_search(
+        "", {"time_range": C.TIME_RANGE_OLDER_THAN_YEAR}
+    )
+    assert [r["id"] for r in rows] == [library["bio"]]
+
+    for range_key in (C.TIME_RANGE_THIS_YEAR, C.TIME_RANGE_THIS_MONTH,
+                      C.TIME_RANGE_THIS_WEEK):
+        code, rows, _ = service.full_text_search("", {"time_range": range_key})
+        assert {r["id"] for r in rows} == recent_ids
+
+    # 全部时间不受限
+    code, rows, _ = service.full_text_search(
+        "", {"time_range": C.TIME_RANGE_ALL}
+    )
+    assert len(rows) == 3
+
+
+def test_resolve_time_range_bounds():
+    """时间段边界：本周以周一零点为起点；今年/本月起点为 1 日；一年以前为
+    当前时刻回溯 365 天的开区间上界；全部/未知值不施加边界。"""
+    monday = date(2026, 9, 28)  # 周一
+    start, end = search_module._resolve_time_range_bounds(
+        C.TIME_RANGE_THIS_WEEK, monday
+    )
+    assert end is None
+    assert start == search_module._local_to_utc_text(
+        datetime(2026, 9, 28, 0, 0)
+    )
+
+    start, _ = search_module._resolve_time_range_bounds(
+        C.TIME_RANGE_THIS_MONTH, monday
+    )
+    assert start == search_module._local_to_utc_text(
+        datetime(2026, 9, 1, 0, 0)
+    )
+
+    start, _ = search_module._resolve_time_range_bounds(
+        C.TIME_RANGE_THIS_YEAR, monday
+    )
+    assert start == search_module._local_to_utc_text(
+        datetime(2026, 1, 1, 0, 0)
+    )
+
+    # 周中（周日）回退到本周一
+    sunday = date(2026, 10, 4)
+    start, _ = search_module._resolve_time_range_bounds(
+        C.TIME_RANGE_THIS_WEEK, sunday
+    )
+    assert start == search_module._local_to_utc_text(
+        datetime(2026, 9, 28, 0, 0)
+    )
+
+    start, end = search_module._resolve_time_range_bounds(
+        C.TIME_RANGE_OLDER_THAN_YEAR, monday
+    )
+    assert start is None
+    end_dt = datetime.strptime(end, "%Y-%m-%d %H:%M:%S")
+    assert timedelta(days=364) < datetime.now(timezone.utc).replace(
+        tzinfo=None
+    ) - end_dt < timedelta(days=366)
+
+    assert search_module._resolve_time_range_bounds(
+        C.TIME_RANGE_ALL, monday
+    ) is None
+    assert search_module._resolve_time_range_bounds("unknown", monday) is None

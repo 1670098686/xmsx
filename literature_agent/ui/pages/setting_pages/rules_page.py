@@ -1,11 +1,9 @@
 """管理中心 - 解析规则配置页：模板切换、学科编辑、维度开关、解析精度、默认规则管理。"""
-from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QWidget,
 )
 
-from business.literature_parse import LiteratureParseService
 from business.parse_rule_service import (
     SUBJECT_TYPE_MAX_LENGTH, DIMENSION_KEYS, ParseRuleService,
 )
@@ -25,19 +23,12 @@ _PRECISION_HINTS = {
 
 
 class SettingRulesPage(QWidget):
-    """解析规则配置子页面。
-
-    Signals:
-        reparse_requested(): 用户保存默认规则后确认“立即重新解析全部已解析文献”。
-    """
-
-    reparse_requested = pyqtSignal()
+    """解析规则配置子页面。"""
 
     def __init__(self, parent=None):
         """初始化解析规则配置子页面。"""
         super().__init__(parent)
         self._service = ParseRuleService()
-        self._parse_service = LiteratureParseService()
         self._loading = False
         self._dim_checks = {}
         self._build_ui()
@@ -214,28 +205,6 @@ class SettingRulesPage(QWidget):
             subject_type=subject_type,
         )
         show_toast(msg, level="success" if code == 0 else "error")
-        if code == 0:
-            self._prompt_reparse_default(rule_id)
-
-    def _prompt_reparse_default(self, rule_id: int) -> None:
-        """修改的是默认规则时，询问是否立即按新规则重新解析全部已解析文献。
-
-        Args:
-            rule_id: 刚保存的规则 id。
-        """
-        if rule_id != self._service.get_default_rule_id():
-            return
-        parsed_ids = self._parse_service.list_parsed_lit_ids()
-        if not parsed_ids:
-            return
-        if ConfirmDialog.confirm(
-            self, "应用到已有解析结果",
-            f"默认规则已更新。库中已有 {len(parsed_ids)} 篇文献的解析报告，"
-            "是否立即按新规则重新解析？\n"
-            "（选“否”也可稍后在文献解析页逐篇点击「重新解析」）",
-            confirm_text="立即重新解析",
-        ):
-            self.reparse_requested.emit()
 
     def _save_as_new(self) -> None:
         """把当前维度配置另存为一条自定义新规则（名称 + 适用学科）。"""

@@ -11,7 +11,7 @@ from config import constants as C
 from data_layer.db_connect import DatabaseManager
 from utils.logger import get_logger
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 # ========== 建表 DDL（按外键依赖顺序排列）==========
 _DDL_STATEMENTS = [
@@ -80,6 +80,7 @@ _DDL_STATEMENTS = [
         innovation_point      TEXT     NOT NULL DEFAULT '',
         research_conclusion   TEXT     NOT NULL DEFAULT '',
         reference_list        TEXT     NOT NULL DEFAULT '',
+        keywords              TEXT     NOT NULL DEFAULT '',
         parse_time            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         rule_id               INTEGER  DEFAULT 1,
         FOREIGN KEY (literature_id) REFERENCES literature_info(id) ON DELETE CASCADE,
@@ -327,6 +328,61 @@ def _purge_legacy_keyword_config(conn: sqlite3.Connection) -> int:
     return cleaned
 
 
+def _migrate_v2_to_v3_report_keywords(conn: sqlite3.Connection) -> bool:
+    """v3 迁移：literature_report 增加 keywords 列（JSON 数组字符串）。
+
+    Returns:
+        True 表示本次执行了 ALTER 加列。
+    """
+    columns = {
+        row[1] for row in conn.execute(
+            "PRAGMA table_info(literature_report)"
+        ).fetchall()
+    }
+    if "keywords" in columns:
+        return False
+    conn.execute(
+        "ALTER TABLE literature_report "
+        "ADD COLUMN keywords TEXT NOT NULL DEFAULT ''"
+    )
+    conn.execute(
+        "INSERT INTO operation_log "
+        "(operate_type, operate_content, literature_id, operate_status) "
+        "VALUES (?, ?, 0, ?)",
+        (C.OP_CONFIG, "v3数据迁移：解析报告表新增关键词字段", C.OP_STATUS_SUCCESS),
+    )
+    return True
+
+
+def _migrate_v3_to_v4_doc_type(conn: sqlite3.Connection) -> int:
+    """v4 迁移：把旧版 .doc 文献的格式标记从 DOCX 修正为独立的 DOC。
+
+    历史版本中 .doc 与 .docx 统一记录为 DOCX，导致格式筛选无法区分。
+    按文件后缀（file_path 存相对路径，后缀在受管目录中保持不变）订正。
+
+    Returns:
+        被订正的文献条数。
+    """
+    cursor = conn.execute(
+        "UPDATE literature_info SET literature_type = ?, "
+        "update_time = CURRENT_TIMESTAMP "
+        "WHERE literature_type = ? AND lower(file_path) LIKE '%.doc'",
+        (C.LIT_TYPE_DOC, C.LIT_TYPE_DOCX),
+    )
+    if cursor.rowcount:
+        conn.execute(
+            "INSERT INTO operation_log "
+            "(operate_type, operate_content, literature_id, operate_status) "
+            "VALUES (?, ?, 0, ?)",
+            (
+                C.OP_CONFIG,
+                f"v4数据迁移：{cursor.rowcount} 篇旧版 .doc 文献格式标记订正为 DOC",
+                C.OP_STATUS_SUCCESS,
+            ),
+        )
+    return cursor.rowcount
+
+
 def init_db(db_manager: DatabaseManager = None) -> None:
     """初始化数据库：建表、建索引、写种子数据、记录 schema 版本。
 
@@ -357,6 +413,12 @@ def init_db(db_manager: DatabaseManager = None) -> None:
                     "v2 迁移完成：清理 %s 个分类同名标签，%s 篇文献自动归入对应分类",
                     removed, promoted,
                 )
+        if old_version < 3 and _migrate_v2_to_v3_report_keywords(conn):
+            logger.info("v3 迁移完成：literature_report 已新增 keywords 列")
+        if old_version < 4:
+            doc_count = _migrate_v3_to_v4_doc_type(conn)
+            if doc_count:
+                logger.info("v4 迁移完成：%s 篇 .doc 文献格式标记订正为 DOC", doc_count)
 
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 

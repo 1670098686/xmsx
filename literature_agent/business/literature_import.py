@@ -59,7 +59,9 @@ class LiteratureImportService:
             # 2. hash 去重
             file_hash = file_helper.calc_file_hash(safe_path)
             existing = self.lit_dao.select_by_hash(file_hash)
+            old_rel_path = ""
             if existing:
+                old_rel_path = existing.get("file_path") or ""
                 if duplicate_policy == DUP_OVERWRITE:
                     # 覆盖：删除旧记录（报告/笔记级联清理）后继续导入
                     with DatabaseManager().write_lock:
@@ -102,6 +104,13 @@ class LiteratureImportService:
             write_operation_log(
                 C.OP_IMPORT, f"导入文献：{lit_info['literature_title']}", lit_id
             )
+            # 覆盖导入成功后清理旧原件（新原件已用不冲突文件名落盘）；
+            # 清理失败不影响导入结果，仅记录警告避免产生孤儿文件无感知
+            if old_rel_path and old_rel_path != rel_path:
+                try:
+                    file_helper.safe_delete_file(old_rel_path, base_dir)
+                except Exception as exc:
+                    logger.warning("覆盖导入后旧原件清理失败：%s", exc)
             return C.CODE_SUCCESS, lit_info, "导入成功"
 
         except Exception as exc:
@@ -195,7 +204,10 @@ class LiteratureImportService:
         return C.CODE_SUCCESS, abs_path, ""
 
     def delete_literature(self, lit_id: int) -> tuple:
-        """删除单篇文献（关联数据由外键级联清理）。
+        """删除单篇文献：先删受管原件，再删数据库记录（报告/笔记级联清理）。
+
+        原件被占用等无法删除时中止操作并保留数据库记录，保证库与目录一致，
+        用户关闭占用程序后可重试；原件已缺失视为可继续删除记录。
 
         Returns:
             (code, None, msg)
@@ -204,25 +216,61 @@ class LiteratureImportService:
             lit = self.lit_dao.select_by_id(lit_id)
             if not lit:
                 return C.CODE_FILE_NOT_FOUND, None, "文献不存在"
+            code, msg = self._delete_stored_file(lit)
+            if code != C.CODE_SUCCESS:
+                return code, None, msg
             with DatabaseManager().write_lock:
                 self.lit_dao.delete_by_id(lit_id)
             write_operation_log(
-                C.OP_DELETE, f"删除文献：{lit.get('literature_title', lit_id)}", lit_id
+                C.OP_DELETE,
+                f"删除文献（含原件）：{lit.get('literature_title', lit_id)}",
+                lit_id,
             )
             return C.CODE_SUCCESS, None, "已删除"
         except Exception as exc:
             return exception_to_code(exc), None, getattr(exc, "message", str(exc))
 
+    @staticmethod
+    def _delete_stored_file(lit: dict) -> tuple:
+        """删除文献在受管存储目录中的原件（路径穿越校验，缺失容忍）。
+
+        Returns:
+            (code, msg)：code=0 表示文件已删除或本就不存在。
+        """
+        rel_path = lit.get("file_path") or ""
+        if not rel_path:
+            return C.CODE_SUCCESS, ""
+        try:
+            base_dir = get_base_dir("literature")
+            abs_path = file_helper.resolve_path(rel_path, base_dir, "literature")
+            file_helper.safe_delete_file(abs_path, base_dir)
+            return C.CODE_SUCCESS, ""
+        except Exception as exc:
+            msg = getattr(exc, "message", str(exc))
+            logger.warning("删除文献原件失败 id=%s：%s", lit.get("id"), msg)
+            return exception_to_code(exc), msg
+
     def clear_all_records(self) -> tuple:
         """清空全部导入记录（高危操作，UI/调用方必须先完成二次确认）。
+
+        先逐篇删除受管目录中的原件：任一文件被占用则中止并保留全部数据库
+        记录，避免出现“记录没了、原件还在”的不一致；全部原件清理完成后
+        再清空数据库记录（解析报告、笔记随外键级联清除）。
 
         Returns:
             (code, deleted_count, msg)
         """
         try:
+            lit_list = self.lit_dao.select_all()
+            for lit in lit_list:
+                code, msg = self._delete_stored_file(lit)
+                if code != C.CODE_SUCCESS:
+                    return code, 0, f"部分原件无法删除，已中止清空：{msg}"
             with DatabaseManager().write_lock:
                 count = self.lit_dao.delete_all()
-            write_operation_log(C.OP_DELETE, f"清空全部文献记录（共 {count} 条）")
+            write_operation_log(
+                C.OP_DELETE, f"清空全部文献记录及原件（共 {count} 条）"
+            )
             return C.CODE_SUCCESS, count, "清空成功"
         except Exception as exc:
             return exception_to_code(exc), 0, getattr(exc, "message", str(exc))

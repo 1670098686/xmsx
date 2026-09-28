@@ -25,7 +25,7 @@ from config.global_config import FONT_BODY
 from config.settings import GlobalState, load_settings
 from data_layer.db_connect import DatabaseManager
 from data_layer.db_init import init_db
-from ui.main_window import MainWindow
+from ui.main_window import MainWindow, install_activation_click_filter
 from ui.theme_manager import ThemeManager
 from utils.logger import get_logger
 
@@ -67,6 +67,10 @@ def main() -> int:
 
     # 4. 应用上次保存的主题
     ThemeManager().apply_theme(app, theme_name)
+
+    # 4.1 Windows：点击非活动窗口只激活窗口、不触发被点中的控件，
+    #     避免从其他软件切回时误触侧边栏导致页面/管理子页被切换
+    install_activation_click_filter(app)
 
     # 5. 创建并显示主窗口
     window = MainWindow()

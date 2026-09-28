@@ -4,6 +4,7 @@ UI 线程只负责创建 Worker、连接信号、显示 LoadingMask；
 业务调用全部在子线程执行，通过信号回传 UI（禁止在子线程操作 Widget）。
 """
 import os
+import threading
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -82,15 +83,17 @@ class ParseWorker(QThread):
         progress(int, str): 进度百分比、阶段描述。
         report_ready(int, dict): 某篇解析完成，传出 lit_id 与报告字典。
         finished_one(int, int, str): 单篇结束：lit_id、code、msg。
+        confirm_degradation(str): 原件通道失败，请求用户授权改用全文文本。
         finished_all(list, list): 全部结束：成功报告列表、失败列表。
-        canceled(): 用户主动停止。
+        ai_notices(list): 本次解析中 AI 失败/降级的用户提示（去重后）。
     """
 
     progress = pyqtSignal(int, str)
     report_ready = pyqtSignal(int, dict)
     finished_one = pyqtSignal(int, int, str)
+    confirm_degradation = pyqtSignal(str)
     finished_all = pyqtSignal(list, list)
-    canceled = pyqtSignal()
+    ai_notices = pyqtSignal(list)
 
     def __init__(self, lit_ids, rule_id: int = None, reparse: bool = False,
                  parent=None):
@@ -105,16 +108,46 @@ class ParseWorker(QThread):
         self.rule_id = rule_id
         self.reparse = reparse
         self._service = LiteratureParseService()
+        # 降级授权的跨线程闸门：子线程阻塞等待 UI 线程答复
+        self._confirm_event = threading.Event()
+        self._confirm_answer = False
+        # 用户选择"本批次全部生效"后缓存的批量决定
+        self._batch_decision = None
+
+    def _degradation_callback(self, error_message: str) -> bool:
+        """子线程内请求降级授权（阻塞至 UI 线程答复）。
+
+        Args:
+            error_message: AI 返回的错误原文。
+        Returns:
+            True 允许改用全文文本通道；False 不允许，回退本地解析。
+        """
+        if self._batch_decision is not None:
+            return self._batch_decision
+        self._confirm_event.clear()
+        self.confirm_degradation.emit(error_message)
+        self._confirm_event.wait()
+        return self._confirm_answer
+
+    def provide_degradation_answer(self, allowed: bool,
+                                   apply_to_batch: bool = False) -> None:
+        """UI 线程回传降级授权结果并放行子线程。
+
+        Args:
+            allowed: 是否允许改用全文文本通道。
+            apply_to_batch: True 时把该决定应用到本批次后续所有文献。
+        """
+        self._confirm_answer = bool(allowed)
+        if apply_to_batch:
+            self._batch_decision = bool(allowed)
+        self._confirm_event.set()
 
     def run(self):
-        """子线程解析入口，逐篇处理，支持打断。"""
+        """子线程解析入口，逐篇处理直至全部完成。"""
         success, failed = [], []
+        notices = []
         total = len(self.lit_ids)
         for index, lit_id in enumerate(self.lit_ids):
-            if self.isInterruptionRequested():
-                self.canceled.emit()
-                break
-
             def progress_cb(percent, message, base=index):
                 """适配单篇解析进度为批量整体进度并发出信号。"""
                 overall = int(((base + percent / 100.0) / total) * 100)
@@ -124,17 +157,55 @@ class ParseWorker(QThread):
                 self._service.reparse if self.reparse else self._service.parse_single
             )
             code, data, msg = parse_call(
-                lit_id, self.rule_id, progress_cb
+                lit_id, self.rule_id, progress_cb,
+                degradation_callback=self._degradation_callback,
             )
             self.finished_one.emit(lit_id, code, msg)
             if code == 0:
                 success.append(data)
                 self.report_ready.emit(lit_id, data)
+                ai_error = (data or {}).get("ai_error")
+                if ai_error and ai_error not in notices:
+                    notices.append(ai_error)
             else:
                 failed.append({"lit_id": lit_id, "msg": msg})
             # 篇间让步，保证批量解析时 UI 不卡顿（低配机型间隔更长）
             QThread.msleep(_batch_interval_ms())
+        self.ai_notices.emit(notices)
         self.finished_all.emit(success, failed)
+
+
+class AIProbeWorker(QThread):
+    """AI 模型配置校验子线程（连通/输出/PDF 原件解析，均为网络耗时操作）。
+
+    Signals:
+        finished_all(int, object, str): validate_ai_config 的 code/result/msg。
+    """
+
+    finished_all = pyqtSignal(int, object, str)
+
+    def __init__(self, model_name: str, base_url: str, api_key: str,
+                 file_channel: str = C.AI_FILE_CHANNEL_AUTO, parent=None):
+        """
+        Args:
+            model_name: 表单当前选择/输入的模型名称。
+            base_url: 表单当前接口地址（未保存的草稿也可校验）。
+            api_key: 表单当前明文密钥（为空时由业务层读已存密钥）。
+            file_channel: 表单选择的原件通道（auto/file_id/file_data/none）。
+        """
+        super().__init__(parent)
+        self.model_name = model_name
+        self.base_url = base_url
+        self.api_key = api_key
+        self.file_channel = file_channel or C.AI_FILE_CHANNEL_AUTO
+        self._service = SystemService()
+
+    def run(self):
+        """子线程执行配置校验并回传结果。"""
+        code, result, msg = self._service.validate_ai_config(
+            self.model_name, self.base_url, self.api_key, self.file_channel
+        )
+        self.finished_all.emit(code, result, msg)
 
 
 class ExportWorker(QThread):

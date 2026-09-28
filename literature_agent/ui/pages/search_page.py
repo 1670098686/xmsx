@@ -67,18 +67,36 @@ class SearchPage(QWidget):
         self.edit_keyword.setClearButtonEnabled(True)
         self.combo_tag = QComboBox()
         self.combo_category_filter = QComboBox()
-        self.combo_year = QComboBox()
+        self.combo_parsed = QComboBox()
+        self.combo_time = QComboBox()
         self.combo_type = QComboBox()
         self.combo_tag.setMinimumWidth(130)
         self.combo_category_filter.setMinimumWidth(120)
-        self.combo_year.setMinimumWidth(120)
-        self.combo_type.setMinimumWidth(110)
+        self.combo_parsed.setMinimumWidth(110)
+        self.combo_time.setMinimumWidth(120)
+        self.combo_type.setMinimumWidth(150)
+        # 解析状态 / 入库时间段 / 文件格式为固定选项（不随库内容变化）
+        self.combo_parsed.addItem("全部状态", C.PARSE_FILTER_ALL)
+        self.combo_parsed.addItem("已解析", C.PARSE_FILTER_DONE)
+        self.combo_parsed.addItem("未解析", C.PARSE_FILTER_TODO)
+        for value, text in (
+            (C.TIME_RANGE_ALL, "全部时间"),
+            (C.TIME_RANGE_OLDER_THAN_YEAR, "一年以前"),
+            (C.TIME_RANGE_THIS_YEAR, "今年"),
+            (C.TIME_RANGE_THIS_MONTH, "本月"),
+            (C.TIME_RANGE_THIS_WEEK, "本周"),
+        ):
+            self.combo_time.addItem(text, value)
+        self.combo_type.addItem("全部格式", None)
+        for lit_type in C.LIT_TYPE_OPTIONS:
+            self.combo_type.addItem(C.LIT_TYPE_LABELS[lit_type], lit_type)
         self.btn_search = PrimaryButton("搜索")
         self.btn_reset = GhostButton("重置")
         filter_row.addWidget(self.edit_keyword, stretch=1)
         filter_row.addWidget(self.combo_tag)
         filter_row.addWidget(self.combo_category_filter)
-        filter_row.addWidget(self.combo_year)
+        filter_row.addWidget(self.combo_parsed)
+        filter_row.addWidget(self.combo_time)
         filter_row.addWidget(self.combo_type)
         filter_row.addWidget(self.btn_search)
         filter_row.addWidget(self.btn_reset)
@@ -144,7 +162,8 @@ class SearchPage(QWidget):
         self.edit_keyword.returnPressed.connect(self._do_search)
         self.combo_tag.currentIndexChanged.connect(self._do_search)
         self.combo_category_filter.currentIndexChanged.connect(self._do_search)
-        self.combo_year.currentIndexChanged.connect(self._do_search)
+        self.combo_parsed.currentIndexChanged.connect(self._do_search)
+        self.combo_time.currentIndexChanged.connect(self._do_search)
         self.combo_type.currentIndexChanged.connect(self._do_search)
         self.btn_assign.clicked.connect(self._assign_category)
         self.btn_select_all.clicked.connect(self._select_all)
@@ -162,10 +181,12 @@ class SearchPage(QWidget):
         self._do_search()
 
     def _reload_filter_combos(self) -> None:
-        """重新加载标签/年份/类型筛选下拉项并保留选择。"""
+        """重新加载标签/分类筛选下拉项并保留选择。
+
+        解析状态、入库时间段、文件格式为固定选项，构建时已填充。
+        """
         tags = self._service.get_all_tags()
         category_options = self._service.get_category_tree_options()
-        options = self._service.get_filter_options()
 
         self.combo_tag.blockSignals(True)
         self.combo_tag.clear()
@@ -181,39 +202,27 @@ class SearchPage(QWidget):
             self.combo_category_filter.addItem(category["text"], category["id"])
         self.combo_category_filter.blockSignals(False)
 
-        self.combo_year.blockSignals(True)
-        self.combo_year.clear()
-        self.combo_year.addItem("全部时间", None)
-        year_labels = options.get("year_labels", {})
-        for year in options.get("years", []):
-            self.combo_year.addItem(year_labels.get(year, f"{year} 年"), year)
-        self.combo_year.blockSignals(False)
-
-        self.combo_type.blockSignals(True)
-        self.combo_type.clear()
-        self.combo_type.addItem("全部格式", None)
-        for lit_type in options.get("types", []):
-            self.combo_type.addItem(lit_type, lit_type)
-        self.combo_type.blockSignals(False)
-
         self.combo_category.clear()
         self.combo_category.addItem("选择分类…", None)
         for category in category_options:
             self.combo_category.addItem(category["text"], category["id"])
 
     def _current_filters(self) -> dict:
-        """收集当前筛选条件为查询字典。"""
+        """收集当前筛选条件为查询字典（业务层统一翻译为 SQL 条件）。"""
         filters = {}
         tag_id = self.combo_tag.currentData()
         category_id = self.combo_category_filter.currentData()
-        year = self.combo_year.currentData()
+        parsed_status = self.combo_parsed.currentData()
+        time_range = self.combo_time.currentData()
         lit_type = self.combo_type.currentData()
         if tag_id:
             filters["tag_id"] = tag_id
         if category_id:
             filters["category_id"] = category_id
-        if year:
-            filters["publish_time"] = year
+        if parsed_status and parsed_status != C.PARSE_FILTER_ALL:
+            filters["parsed_status"] = parsed_status
+        if time_range and time_range != C.TIME_RANGE_ALL:
+            filters["time_range"] = time_range
         if lit_type:
             filters["literature_type"] = lit_type
         return filters
@@ -235,7 +244,8 @@ class SearchPage(QWidget):
         self.edit_keyword.clear()
         self.combo_tag.setCurrentIndex(0)
         self.combo_category_filter.setCurrentIndex(0)
-        self.combo_year.setCurrentIndex(0)
+        self.combo_parsed.setCurrentIndex(0)
+        self.combo_time.setCurrentIndex(0)
         self.combo_type.setCurrentIndex(0)
         self._do_search()
 
@@ -245,13 +255,15 @@ class SearchPage(QWidget):
         """捕获当前检索条件，供关闭时持久化。
 
         Returns:
-            {"keyword","tag_id","category_id","year","literature_type"} 纯数据字典。
+            {"keyword","tag_id","category_id","parsed_status",
+             "time_range","literature_type"} 纯数据字典。
         """
         return {
             "keyword": self.edit_keyword.text().strip(),
             "tag_id": self.combo_tag.currentData(),
             "category_id": self.combo_category_filter.currentData(),
-            "year": self.combo_year.currentData(),
+            "parsed_status": self.combo_parsed.currentData(),
+            "time_range": self.combo_time.currentData(),
             "literature_type": self.combo_type.currentData(),
         }
 
@@ -263,7 +275,10 @@ class SearchPage(QWidget):
         self._select_combo_by_data(self.combo_tag, state.get("tag_id"))
         self._select_combo_by_data(self.combo_category_filter,
                                    state.get("category_id"))
-        self._select_combo_by_data(self.combo_year, state.get("year"))
+        self._select_combo_by_data(self.combo_parsed,
+                                   state.get("parsed_status", C.PARSE_FILTER_ALL))
+        self._select_combo_by_data(self.combo_time,
+                                   state.get("time_range", C.TIME_RANGE_ALL))
         self._select_combo_by_data(self.combo_type, state.get("literature_type"))
         self._do_search()
 
@@ -431,11 +446,22 @@ class SearchPage(QWidget):
             self._do_search()
 
     def _batch_delete(self) -> None:
-        """批量删除选中文献（二次确认后执行）。"""
+        """批量删除选中文献（按是否存有数据库报告给出明确二次确认）。"""
         ids = self._selected_list()
+        report_count = len(self._service.get_lit_ids_with_report(ids))
+        if report_count:
+            content = (
+                f"确定删除选中的 {len(ids)} 篇文献吗？\n"
+                f"其中 {report_count} 篇在数据库中存有解析报告，删除后文献"
+                "原件、解析报告及全部笔记将一并清除，且不可恢复。"
+            )
+        else:
+            content = (
+                f"确定删除选中的 {len(ids)} 篇文献吗？"
+                "删除后文献原件、文献记录及全部笔记将一并清除，且不可恢复。"
+            )
         if ConfirmDialog.confirm(
-            self, title="批量删除文献",
-            content=f"确定删除选中的 {len(ids)} 篇文献吗？解析报告与笔记将一并删除，且不可恢复。",
+            self, title="批量删除文献", content=content,
             confirm_text="全部删除", danger=True,
         ):
             code, data, msg = self._service.batch_delete(ids)
@@ -504,11 +530,20 @@ class SearchPage(QWidget):
             self._do_search()
 
     def _delete_one(self, lit_id: int) -> None:
-        """删除单篇文献（二次确认后执行）。"""
+        """删除单篇文献；数据库中已有解析报告时必须明确告知并二次确认。"""
+        has_report = lit_id in self._service.get_lit_ids_with_report([lit_id])
+        if has_report:
+            content = (
+                "该文献在数据库中已有解析报告。删除后，文献原件、文献记录、"
+                "数据库中的解析报告及笔记将一并删除，且不可恢复。确定继续吗？"
+            )
+        else:
+            content = (
+                "确定删除该文献吗？删除后文献原件、文献记录及笔记不可恢复。"
+            )
         if ConfirmDialog.confirm(
             self, title="删除文献",
-            content="确定删除该文献吗？其解析报告与笔记将一并删除，且不可恢复。",
-            confirm_text="删除", danger=True,
+            content=content, confirm_text="一并删除", danger=True,
         ):
             code, _data, msg = self._service.delete_literature(lit_id)
             show_toast(

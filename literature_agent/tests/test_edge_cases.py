@@ -102,7 +102,7 @@ def test_legacy_doc_hint(mem_conn, storage, tmp_path, monkeypatch):
 
 
 def test_doc_actually_renamed_docx(mem_conn, storage, tmp_path):
-    """后缀 .doc 但内容是 OOXML（改名文件）：直接按 DOCX 提取成功。"""
+    """后缀 .doc 但内容是 OOXML（改名文件）：按 DOCX 引擎提取，类型按后缀记为 DOC。"""
     docx = pytest.importorskip("docx")
     real_docx = tmp_path / "real.docx"
     document = docx.Document()
@@ -113,7 +113,7 @@ def test_doc_actually_renamed_docx(mem_conn, storage, tmp_path):
 
     text, meta, lit_type = file_parser.auto_extract(str(renamed))
     assert "改名文档正文" in text
-    assert lit_type == C.LIT_TYPE_DOCX
+    assert lit_type == C.LIT_TYPE_DOC
     assert meta["paragraph_count"] >= 1
 
 

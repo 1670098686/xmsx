@@ -387,7 +387,7 @@ class ImportPage(QWidget):
         """清空当前导入记录（二次确认后执行）。"""
         if ConfirmDialog.confirm(
             self, title="清空全部导入记录",
-            content="将删除全部文献及其解析报告、笔记（不可恢复），确定继续吗？",
+            content="将删除全部文献原件及其解析报告、笔记（不可恢复），确定继续吗？",
             confirm_text="全部清空", danger=True,
         ):
             code, count, msg = self._service.clear_all_records()

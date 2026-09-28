@@ -15,9 +15,13 @@ from business.system_service import SystemService
 from config import constants as C
 from ui.pages.setting_pages import build_scroll_content, build_section_card
 from ui.widgets.buttons import DangerButton, GhostButton, PrimaryButton
-from ui.widgets.dialogs import ConfirmDialog, InputDialog
+from ui.widgets.dialogs import (
+    AIProbeResultDialog, ConfirmDialog, InputDialog,
+)
 from ui.widgets.empty_state import EmptyState
+from ui.widgets.loading import LoadingMask
 from ui.widgets.toast import show_toast
+from ui.widgets.worker import AIProbeWorker
 
 
 class SettingAIPage(QWidget):
@@ -29,6 +33,8 @@ class SettingAIPage(QWidget):
         self._service = SystemService()
         self._loading = False
         self._key_dirty = False
+        self._probe_worker = None
+        self._probe_mask = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -69,6 +75,14 @@ class SettingAIPage(QWidget):
         key_row.addWidget(self.edit_api_key, stretch=1)
         key_row.addWidget(self.btn_reveal)
         form.addRow("API 密钥：", key_row_widget)
+
+        self.combo_channel = QComboBox()
+        for channel in C.AI_FILE_CHANNELS:
+            self.combo_channel.addItem(
+                C.AI_FILE_CHANNEL_LABELS.get(channel, channel), channel
+            )
+        self.combo_channel.setMinimumWidth(420)
+        form.addRow("原件通道：", self.combo_channel)
         layout.addLayout(form)
 
         tip = QLabel("密钥使用 Fernet 对称加密后写入本地数据库，仅保存在本机，"
@@ -77,9 +91,21 @@ class SettingAIPage(QWidget):
         tip.setWordWrap(True)
         layout.addWidget(tip)
 
+        channel_tip = QLabel(
+            "原件通道说明：qwen3.8 等模型支持 PDF Base64 直传（本地文件内联，"
+            "无需托管）；qwen-long、Kimi 等使用文件 ID 托管直传；其他模型可先选"
+            "「自动识别」并点击「校验配置」，实测通过后按提示保存。"
+            "选择「仅全文文本」则任何模型都用本地提取的全文解析。"
+        )
+        channel_tip.setProperty("level", "aux")
+        channel_tip.setWordWrap(True)
+        layout.addWidget(channel_tip)
+
         action_row = QHBoxLayout()
         self.btn_save = PrimaryButton("保存配置")
+        self.btn_probe = GhostButton("校验配置")
         action_row.addWidget(self.btn_save)
+        action_row.addWidget(self.btn_probe)
         action_row.addStretch(1)
         layout.addLayout(action_row)
         content_layout.addWidget(card)
@@ -94,6 +120,7 @@ class SettingAIPage(QWidget):
         self.btn_reveal.toggled.connect(self._toggle_reveal)
         self.edit_api_key.textEdited.connect(self._on_key_edited)
         self.btn_save.clicked.connect(self._save)
+        self.btn_probe.clicked.connect(self._probe_config)
         self.btn_add.clicked.connect(self._add_model)
         self.btn_delete.clicked.connect(self._delete_model)
 
@@ -128,7 +155,9 @@ class SettingAIPage(QWidget):
         self.combo_models.setEnabled(has_models)
         self.edit_base_url.setEnabled(has_models)
         self.edit_api_key.setEnabled(has_models)
+        self.combo_channel.setEnabled(has_models)
         self.btn_save.setEnabled(has_models)
+        self.btn_probe.setEnabled(has_models)
         self.btn_delete.setEnabled(has_models)
         self.btn_reveal.setEnabled(has_models)
 
@@ -167,6 +196,7 @@ class SettingAIPage(QWidget):
         """清空全部表单（模型删光时调用，避免残留被删模型的数据）。"""
         self.edit_base_url.clear()
         self.edit_api_key.clear()
+        self.combo_channel.setCurrentIndex(0)
         self.lbl_current.setText("")
         self._key_dirty = False
         self._reset_reveal()
@@ -185,6 +215,11 @@ class SettingAIPage(QWidget):
             return
         self.edit_base_url.setText(model["base_url"])
         self.edit_api_key.setText(model["api_key"])
+        channel = model.get("file_channel") or C.AI_FILE_CHANNEL_AUTO
+        channel_index = self.combo_channel.findData(channel)
+        self.combo_channel.setCurrentIndex(
+            channel_index if channel_index >= 0 else 0
+        )
         self._reset_reveal()
         self.lbl_current.setText("✓ 当前使用" if model["is_current"] else "")
 
@@ -218,12 +253,13 @@ class SettingAIPage(QWidget):
         self._key_dirty = True
 
     def _save(self) -> None:
-        """保存接口地址；密钥仅在被编辑过时更新（否则保持原密文）。"""
+        """保存接口地址与原件通道；密钥仅在被编辑过时更新（否则保持原密文）。"""
         name = self._current_model_name()
         if not name:
             show_toast("请先选择模型", level="warn")
             return
         base_url = self.edit_base_url.text().strip()
+        channel = self.combo_channel.currentData() or C.AI_FILE_CHANNEL_AUTO
         if self._key_dirty:
             api_key = self.edit_api_key.text().strip()
             if not api_key:
@@ -232,7 +268,9 @@ class SettingAIPage(QWidget):
         else:
             # 未编辑密钥：传 None，业务层完全不动已存密文
             api_key = None
-        code, _data, msg = self._service.set_ai_key(name, api_key, base_url)
+        code, _data, msg = self._service.set_ai_key(
+            name, api_key, base_url, file_channel=channel
+        )
         show_toast(msg, level="success" if code == 0 else "error")
         if code == 0:
             # 重新装载；若用户正处于明文查看态，装载后保持明文
@@ -273,3 +311,95 @@ class SettingAIPage(QWidget):
         if code == 0:
             # refresh 会选中剩余的第一个；一个不剩时清空接口地址与密钥输入框
             self.refresh()
+
+    # ================= 配置校验 =================
+
+    def _probe_config(self) -> None:
+        """启动子线程校验当前表单中的 AI 配置（无需先保存）。
+
+        校验三项：①连通与鉴权；②模型能否正常返回内容；
+        ③模型是否支持 PDF 原件直传解析。
+        """
+        if self._probe_worker and self._probe_worker.isRunning():
+            show_toast("正在校验中，请稍候", level="info")
+            return
+        name = self._current_model_name()
+        if not name:
+            show_toast("请先选择或新增模型", level="warn")
+            return
+        base_url = self.edit_base_url.text().strip()
+        if not base_url:
+            show_toast("请先填写接口地址", level="warn")
+            return
+        # 密钥框为空（如新增模型尚未填写）时传 None，业务层改读已存密钥
+        api_key = self.edit_api_key.text().strip() or None
+        channel = self.combo_channel.currentData() or C.AI_FILE_CHANNEL_AUTO
+
+        self._set_form_enabled(False)
+        self._probe_worker = AIProbeWorker(
+            name, base_url, api_key, file_channel=channel, parent=self
+        )
+        self._probe_worker.finished_all.connect(self._on_probe_finished)
+        self._probe_mask = LoadingMask(self)
+        self._probe_mask.show_progress(
+            self, "正在校验 AI 配置（连通测试 / PDF 原件探测，可能需要数十秒）..."
+        )
+        self._probe_worker.start()
+
+    def _on_probe_finished(self, code: int, result, msg: str) -> None:
+        """校验子线程结束：关闭遮罩、展示结果；自动识别命中时询问是否保存通道。"""
+        if self._probe_mask:
+            self._probe_mask.hide_mask()
+            self._probe_mask = None
+        self._probe_worker = None
+        self._set_form_enabled(True)
+        AIProbeResultDialog.show_result(self.window(), result, msg)
+        self._maybe_save_detected_channel(code, result)
+
+    def _maybe_save_detected_channel(self, code: int, result) -> None:
+        """自动识别模式实测到可用通道时，经用户确认后保存到模型配置。
+
+        仅当：校验成功、表单选的是自动识别、实测通道明确、用户未在期间切换模型
+        时才询问；任何情况都不静默改动配置。
+        """
+        if code != C.CODE_SUCCESS or not isinstance(result, dict):
+            return
+        detected = result.get("detected_channel") or ""
+        selected = result.get("file_channel") or C.AI_FILE_CHANNEL_AUTO
+        name = result.get("name") or ""
+        if selected != C.AI_FILE_CHANNEL_AUTO or not name:
+            return
+        if detected not in (
+            C.AI_FILE_CHANNEL_FILE_DATA, C.AI_FILE_CHANNEL_FILE_ID,
+        ):
+            return
+        if name != self._current_model_name():
+            return
+        label = C.AI_FILE_CHANNEL_SHORT_LABELS.get(detected, detected)
+        if not ConfirmDialog.confirm(
+            self.window(), "保存识别到的原件通道",
+            f"自动识别确认该模型可通过「{label}」直接读取本地 PDF 原件，"
+            "是否立即把该通道保存到模型配置？保存后解析文献将直传 PDF 原件。",
+            confirm_text="保存通道",
+        ):
+            return
+        save_code, _d, save_msg = self._service.set_ai_key(
+            name, None, None, file_channel=detected
+        )
+        if save_code == C.CODE_SUCCESS:
+            self._load_current_model()
+            show_toast("原件通道已保存，解析时将直传 PDF 原件", level="success")
+        else:
+            show_toast(save_msg, level="error")
+
+    def _set_form_enabled(self, enabled: bool) -> None:
+        """校验期间统一禁用/恢复表单与按钮，避免并发操作。"""
+        self.combo_models.setEnabled(enabled)
+        self.edit_base_url.setEnabled(enabled)
+        self.edit_api_key.setEnabled(enabled)
+        self.combo_channel.setEnabled(enabled)
+        self.btn_save.setEnabled(enabled)
+        self.btn_probe.setEnabled(enabled)
+        self.btn_add.setEnabled(enabled)
+        self.btn_delete.setEnabled(enabled)
+        self.btn_reveal.setEnabled(enabled)

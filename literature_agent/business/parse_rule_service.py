@@ -1,6 +1,5 @@
 """解析规则配置业务：规则 CRUD、rule_detail JSON 读写、默认规则管理。"""
 import json
-from datetime import datetime, timezone
 
 from config import constants as C
 from data_layer.dao.config_dao import SystemConfigDao
@@ -94,6 +93,28 @@ class ParseRuleService:
         configured = self.config_dao.get(C.CFG_PARSE_DEFAULT_RULE, "1")
         return int(configured or 1)
 
+    def get_default_dimensions(self) -> dict:
+        """获取当前默认规则的六个解析维度开关。
+
+        报告展示与导出统一按此开关隐藏停用维度（无需重新解析旧报告）；
+        规则读取异常时退化为全部启用，保证报告可读。
+
+        Returns:
+            {维度key: bool}，键集合固定为 DIMENSION_KEYS。
+        """
+        all_on = {key: True for key in DIMENSION_KEYS}
+        try:
+            detail = self.get_rule_detail(self.get_default_rule_id())
+            if not detail:
+                return all_on
+            dimensions = detail.get("dimensions") or {}
+            return {
+                key: bool(dimensions.get(key, True)) for key in DIMENSION_KEYS
+            }
+        except Exception as exc:
+            logger.warning("读取默认规则维度失败，按全部启用处理：%s", exc)
+            return all_on
+
     @staticmethod
     def is_builtin_rule(rule_id: int) -> bool:
         """判断规则是否为内置预设模板（预设模板的适用学科只读）。
@@ -155,9 +176,9 @@ class ParseRuleService:
         """更新规则维度/权重/精度/适用学科（JSON 合并写回）。
 
         内置预设规则的适用学科只读；自定义规则可自由编辑学科。
-        修改的是当前默认规则时同步刷新规则版本时间戳，供解析页提示
-        旧报告按新规则重新解析。历史版本 rule_detail 中残留的
-        keyword_top_n 字段会在保存时自动清除。
+        规则修改只影响此后新发起的解析；已经解析完成并入库的报告不会被
+        判定为过期，也不会被要求重新解析（用户可随时手动逐篇重新解析）。
+        历史版本 rule_detail 中残留的 keyword_top_n 字段会在保存时自动清除。
 
         Args:
             rule_id: 规则 id。
@@ -209,19 +230,9 @@ class ParseRuleService:
         try:
             self.rule_dao.update_by_id(rule_id, fields)
             write_operation_log(C.OP_CONFIG, f"更新解析规则：{rule['rule_name']}")
-            if int(rule_id) == self.get_default_rule_id():
-                self.bump_default_rule_version()
             return C.CODE_SUCCESS, None, "规则已保存"
         except Exception as exc:
             return exception_to_code(exc), None, getattr(exc, "message", str(exc))
-
-    def bump_default_rule_version(self) -> None:
-        """把默认规则版本时间戳刷新为当前 UTC 时间（修改默认规则后调用）。
-
-        解析页据此判断已有报告是否早于最新规则、需要重新解析。
-        """
-        now_text = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        self.config_dao.set(C.CFG_PARSE_RULE_VERSION, now_text)
 
     def rename_rule(self, rule_id: int, new_name: str) -> tuple:
         """重命名规则。"""
@@ -255,7 +266,6 @@ class ParseRuleService:
                     C.CFG_PRECISION_DEFAULT,
                     str(rule.get("precision_level", 3)),
                 )
-            self.bump_default_rule_version()
             write_operation_log(C.OP_CONFIG, f"设置默认解析规则：{rule['rule_name']}")
             return C.CODE_SUCCESS, None, "已设为默认规则"
         except Exception as exc:
@@ -290,8 +300,6 @@ class ParseRuleService:
                 "precision_level": 3,
             })
             write_operation_log(C.OP_CONFIG, f"重置解析规则：{rule['rule_name']}")
-            if int(rule_id) == self.get_default_rule_id():
-                self.bump_default_rule_version()
             return C.CODE_SUCCESS, None, "已重置为默认配置"
         except Exception as exc:
             return exception_to_code(exc), None, getattr(exc, "message", str(exc))

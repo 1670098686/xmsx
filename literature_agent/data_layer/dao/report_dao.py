@@ -11,8 +11,9 @@ class LiteratureReportDao(BaseDao):
             """
             INSERT INTO literature_report
                 (literature_id, research_background, core_view, research_method,
-                 innovation_point, research_conclusion, reference_list, rule_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 innovation_point, research_conclusion, reference_list,
+                 keywords, rule_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 report.get("literature_id"),
@@ -22,6 +23,7 @@ class LiteratureReportDao(BaseDao):
                 report.get("innovation_point", ""),
                 report.get("research_conclusion", ""),
                 report.get("reference_list", ""),
+                report.get("keywords", ""),
                 report.get("rule_id", 1),
             ),
         )
@@ -41,7 +43,8 @@ class LiteratureReportDao(BaseDao):
         """按文献 id 动态更新报告字段。"""
         allowed = {
             "research_background", "core_view", "research_method",
-            "innovation_point", "research_conclusion", "reference_list", "rule_id",
+            "innovation_point", "research_conclusion", "reference_list",
+            "keywords", "rule_id",
         }
         sets, params = [], []
         for key, value in fields.items():
@@ -67,3 +70,24 @@ class LiteratureReportDao(BaseDao):
         )
         self.conn.commit()
         return cursor.rowcount
+
+    def select_lit_ids_with_report(self, literature_ids: list) -> list:
+        """从给定文献 id 集合中筛出数据库中已存有解析报告的 id。
+
+        Args:
+            literature_ids: 文献 id 列表。
+        Returns:
+            存在报告记录的文献 id 列表（保持入参去重后的顺序）。
+        """
+        ids = [int(lit_id) for lit_id in literature_ids if lit_id is not None]
+        if not ids:
+            return []
+        unique_ids = list(dict.fromkeys(ids))
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = self.conn.execute(
+            f"SELECT DISTINCT literature_id FROM literature_report "
+            f"WHERE literature_id IN ({placeholders})",
+            tuple(unique_ids),
+        ).fetchall()
+        found = {row[0] for row in rows}
+        return [lit_id for lit_id in unique_ids if lit_id in found]

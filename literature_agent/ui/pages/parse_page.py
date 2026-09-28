@@ -4,7 +4,7 @@ import re
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
-    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
+    QComboBox, QFileDialog, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
     QProgressBar, QPushButton, QScrollArea, QSplitter, QStackedWidget,
     QVBoxLayout, QWidget,
 )
@@ -14,9 +14,12 @@ from business.literature_parse import LiteratureParseService
 from business.literature_search import LiteratureSearchService
 from business.system_service import SystemService
 from config import constants as C
-from ui.widgets.buttons import GhostButton, PrimaryButton
+from ui.widgets.buttons import DangerButton, GhostButton, PrimaryButton
 from ui.widgets.collapse import CollapseBlock
-from ui.widgets.dialogs import ExportFormatDialog
+from ui.widgets.dialogs import (
+    ConfirmDialog, DEGRADE_ALLOW_ALL, DEGRADE_ALLOW_ONCE, AlertDialog,
+    DegradeConfirmDialog, ExportFormatDialog,
+)
 from ui.widgets.empty_state import EmptyState
 from ui.widgets.loading import LoadingMask
 from ui.widgets.pdf_viewer import PdfViewer
@@ -56,12 +59,14 @@ class ParsePage(QWidget):
         self._export_service = ExportBackupService()
         self._worker = None
         self._loading = None
+        # 解析进行中不使用全屏遮罩：进度只走页面内进度条，不遮挡工具区
         self._library_worker = None
         self._render_worker = None
         self._render_loading = None
         self._lit_list = []
         self._has_report = False
-        self._parse_canceled = False
+        self._enabled_dimensions = {field for field, _t, _h in BLOCKS[1:]}
+        self._pending_ai_notices = []
         self._build_ui()
 
     # ================= UI =================
@@ -82,9 +87,9 @@ class ParsePage(QWidget):
         self.combo_lit = QComboBox()
         self.combo_lit.setMinimumWidth(280)
         self.btn_parse = PrimaryButton("开始解析")
-        self.btn_stop = GhostButton("停止解析")
         self.btn_reparse = GhostButton("重新解析")
         self.btn_export = GhostButton("导出报告")
+        self.btn_delete_report = DangerButton("删除报告")
         export_menu = QMenu(self)
         action_save_lib = export_menu.addAction("保存到资料库…")
         action_save_lib.triggered.connect(self._save_current_to_library)
@@ -97,30 +102,15 @@ class ParsePage(QWidget):
                 lambda checked, f=fmt: self._export_report(f)
             )
         self.btn_export.setMenu(export_menu)
-        self.btn_stop.setEnabled(False)
         self.btn_reparse.setEnabled(False)
         self.btn_export.setEnabled(False)
+        self.btn_delete_report.setEnabled(False)
         toolbar.addWidget(self.combo_lit, stretch=1)
         toolbar.addWidget(self.btn_parse)
-        toolbar.addWidget(self.btn_stop)
         toolbar.addWidget(self.btn_reparse)
         toolbar.addWidget(self.btn_export)
+        toolbar.addWidget(self.btn_delete_report)
         root.addLayout(toolbar)
-
-        # 规则模板更新后，提示当前报告需重新解析的横幅
-        self.stale_bar = QFrame()
-        self.stale_bar.setObjectName("batchBar")
-        stale_layout = QHBoxLayout(self.stale_bar)
-        stale_layout.setContentsMargins(10, 6, 10, 6)
-        self.lbl_stale = QLabel("解析规则模板已更新，当前报告基于旧规则生成")
-        self.lbl_stale.setProperty("level", "aux")
-        self.btn_apply_rule = QPushButton("重新解析，应用最新规则")
-        self.btn_apply_rule.setCursor(Qt.PointingHandCursor)
-        stale_layout.addWidget(self.lbl_stale)
-        stale_layout.addStretch(1)
-        stale_layout.addWidget(self.btn_apply_rule)
-        self.stale_bar.setVisible(False)
-        root.addWidget(self.stale_bar)
 
         progress_row = QHBoxLayout()
         self.progress = QProgressBar()
@@ -146,11 +136,8 @@ class ParsePage(QWidget):
 
         self.combo_lit.currentIndexChanged.connect(self._on_lit_changed)
         self.btn_parse.clicked.connect(self._start_parse)
-        self.btn_stop.clicked.connect(self._stop_parse)
         self.btn_reparse.clicked.connect(lambda: self._start_parse(reparse=True))
-        self.btn_apply_rule.clicked.connect(
-            lambda: self._start_parse(reparse=True)
-        )
+        self.btn_delete_report.clicked.connect(self._delete_report)
 
     def _build_splitter(self) -> QSplitter:
         """构建文献选择、原文与报告分栏。"""
@@ -207,9 +194,10 @@ class ParsePage(QWidget):
     # ================= 刷新/选文献 =================
 
     def refresh(self) -> None:
-        """页面显示时刷新文献下拉。"""
+        """页面显示：刷新文献下拉，并按当前默认规则维度显隐报告折叠块。"""
         code, rows, _ = self._search_service.get_all_literature()
         self._lit_list = rows if code == C.CODE_SUCCESS else []
+        self._apply_dimension_visibility()
         self.combo_lit.blockSignals(True)
         current_id = self.current_lit_id()
         self.combo_lit.clear()
@@ -226,15 +214,19 @@ class ParsePage(QWidget):
 
         if self._lit_list:
             self.stack.setCurrentIndex(0)
-            self.combo_lit.setCurrentIndex(select_index if select_index >= 0 else 0)
-            if select_index < 0:
-                self._on_lit_changed(0)
+            target_index = select_index if select_index >= 0 else 0
+            # clear()+addItem 后 Qt 已自动选中第 0 项（信号被阻塞），若目标
+            # 恰为第 0 项，setCurrentIndex 不再发射切换信号，需手动同步
+            # 原文/报告区，保证删除报告等操作后界面状态正确
+            already_on_target = self.combo_lit.currentIndex() == target_index
+            self.combo_lit.setCurrentIndex(target_index)
+            if select_index < 0 or already_on_target:
+                self._on_lit_changed(target_index)
         else:
             self.stack.setCurrentIndex(1)
             self.viewer.setPlainText("")
             self.pdf_viewer.close_document()
             self._clear_blocks()
-            self.stale_bar.setVisible(False)
 
     def select_literature(self, lit_id: int) -> None:
         """外部（检索页卡片/全局状态）请求选中某文献。"""
@@ -268,18 +260,28 @@ class ParsePage(QWidget):
             self._has_report = True
             self.btn_reparse.setEnabled(True)
             self.btn_export.setEnabled(True)
+            self.btn_delete_report.setEnabled(True)
         else:
             self._clear_blocks()
             self._has_report = False
             self.btn_reparse.setEnabled(False)
             self.btn_export.setEnabled(False)
-        self._refresh_stale_hint(lit_id)
+            self.btn_delete_report.setEnabled(False)
 
-    def _refresh_stale_hint(self, lit_id: int) -> None:
-        """报告早于最新默认解析规则时显示重新解析提示横幅。"""
-        stale = bool(lit_id) and self._has_report \
-            and self._parse_service.is_report_stale(lit_id)
-        self.stale_bar.setVisible(stale)
+    def _apply_dimension_visibility(self) -> None:
+        """按当前默认解析规则的维度勾选显示/隐藏报告折叠块。
+
+        停用维度的折叠块直接隐藏（含其旧报告内容），重新勾选后无需重新
+        解析即可恢复显示；“文献基础信息”块始终展示。
+        """
+        dimensions = self._parse_service.get_default_dimensions()
+        self._enabled_dimensions = {
+            field for field, _title, _highlight in BLOCKS[1:]
+            if dimensions.get(field, True)
+        }
+        self.blocks["basic"].setVisible(True)
+        for field, _title, _highlight in BLOCKS[1:]:
+            self.blocks[field].setVisible(field in self._enabled_dimensions)
 
     def _load_original(self, lit_id: int) -> None:
         """按上传格式加载原文：子线程准备 PDF（PDF 直出、Word 转 PDF），TXT 走文本。"""
@@ -325,22 +327,6 @@ class ParsePage(QWidget):
 
     # ================= 解析 =================
 
-    def start_batch_reparse(self, lit_ids: list = None) -> None:
-        """规则更新后批量重新解析入口（管理中心保存规则并确认后由主窗口调用）。
-
-        Args:
-            lit_ids: 要重新解析的文献 id 列表；None 时自动取全部已解析文献。
-        """
-        if lit_ids is None:
-            lit_ids = self._parse_service.list_parsed_lit_ids()
-        lit_ids = list(lit_ids or [])
-        if not lit_ids:
-            show_toast("暂无需重新解析的文献", "info", parent=self.window())
-            return
-        self._launch_parse(
-            lit_ids, True, f"正在按最新规则重新解析 {len(lit_ids)} 篇文献..."
-        )
-
     def _launch_parse(self, lit_ids, reparse: bool, mask_text: str) -> bool:
         """创建并启动解析子线程。
 
@@ -354,16 +340,21 @@ class ParsePage(QWidget):
         if self._worker and self._worker.isRunning():
             show_toast("解析进行中，请稍候", "info", parent=self.window())
             return False
-        self._parse_canceled = False
+        self._pending_ai_notices = []
+        is_batch = not isinstance(lit_ids, int) and len(lit_ids) > 1
         self._worker = ParseWorker(lit_ids, reparse=reparse, parent=self)
         self._worker.progress.connect(self._on_progress)
         self._worker.report_ready.connect(self._on_report_ready)
         self._worker.finished_all.connect(self._on_finished_all)
-        self._worker.canceled.connect(self._on_canceled)
+        self._worker.confirm_degradation.connect(
+            lambda msg: self._on_confirm_degradation(msg, is_batch)
+        )
+        self._worker.ai_notices.connect(self._on_ai_notices)
 
-        self._loading = LoadingMask(self)
-        self._loading.show_progress(self, mask_text)
+        # 解析不弹全屏遮罩：仅用工具条下方的页面内进度条展示进度
         self._set_running(True)
+        self.progress.setValue(0)
+        self.progress_label.setText(mask_text)
         self._worker.start()
         return True
 
@@ -376,23 +367,48 @@ class ParsePage(QWidget):
         self._launch_parse(lit_id, reparse,
                            "重新解析中..." if reparse else "解析中...")
 
-    def _stop_parse(self) -> None:
-        """请求中断解析任务。"""
-        if self._worker and self._worker.isRunning():
-            self._worker.requestInterruption()
-            self.btn_stop.setEnabled(False)
-
     def _on_progress(self, percent: int, message: str) -> None:
-        """接收解析进度并更新进度条。"""
+        """接收解析进度并更新页面内进度条（不使用遮罩弹窗）。"""
         self.progress.setValue(percent)
         self.progress_label.setText(message)
-        if self._loading:
-            self._loading.show_percent(percent, message)
 
     def _on_report_ready(self, lit_id: int, report: dict) -> None:
         """接收单篇报告并填充展示块。"""
         if lit_id == self.current_lit_id():
             self._fill_blocks(report)
+
+    def _on_confirm_degradation(self, error_message: str, is_batch: bool) -> None:
+        """AI 原件通道失败：弹窗把模型错误原文告知用户并征询降级授权。
+
+        Args:
+            error_message: AI 返回的错误原文。
+            is_batch: 本次是否为批量解析（提供"本批次全部生效"选项）。
+        """
+        choice = DegradeConfirmDialog.ask(
+            self.window(), error_message, batch=is_batch
+        )
+        self._worker.provide_degradation_answer(
+            allowed=choice in (DEGRADE_ALLOW_ONCE, DEGRADE_ALLOW_ALL),
+            apply_to_batch=(choice == DEGRADE_ALLOW_ALL),
+        )
+
+    def _on_ai_notices(self, notices: list) -> None:
+        """暂存本次解析产生的 AI 失败/降级提示，结束时统一弹窗一次。"""
+        self._pending_ai_notices = list(notices or [])
+
+    def _show_ai_notices(self) -> None:
+        """把本次解析中 AI 通道的错误聚合为一个弹窗告知用户。"""
+        if not self._pending_ai_notices:
+            return
+        lines = [f"· {text}" for text in self._pending_ai_notices]
+        AlertDialog.show_info(
+            self.window(),
+            "AI 解析提示（已安全处理）",
+            "以下文献的 AI 解析过程中出现问题，系统已自动改用本地规则完成解析，"
+            "报告内容不受影响；请根据错误说明检查 AI 模型配置：\n\n"
+            + "\n".join(lines),
+        )
+        self._pending_ai_notices = []
 
     def _on_finished_all(self, success: list, failed: list) -> None:
         """批量解析结束后汇总成功与失败，并引导保存报告到资料库。"""
@@ -408,20 +424,60 @@ class ParsePage(QWidget):
             self.progress_label.setText("解析完成")
             self.btn_reparse.setEnabled(True)
             self.btn_export.setEnabled(True)
-            show_toast("解析完成", "success", parent=self.window())
+            engines = {item.get("parse_engine", "local") for item in success}
+            if len(success) == 1:
+                toast_msg = {
+                    "ai_file": "解析完成：AI 已通读原件",
+                    "ai_text": "解析完成：AI 已通读全文文本",
+                    "local": "解析完成（本地规则，AI 不可用）",
+                }.get(next(iter(engines)), "解析完成")
+            elif engines <= {"ai_file", "ai_text"}:
+                toast_msg = f"解析完成：AI 已通读 {len(success)} 篇文献"
+            else:
+                toast_msg = f"解析完成 {len(success)} 篇（部分使用本地规则）"
+            show_toast(toast_msg, "success", parent=self.window())
         self.refresh()
-        # 解析流程最后一步：选择格式并保存到项目资料库（用户被停止时不弹）
-        if success and not self._parse_canceled:
+        # AI 错误必须显式弹窗告知（聚合一次，避免批量时弹窗轰炸）
+        self._show_ai_notices()
+        # 解析流程最后一步：选择格式并保存到项目资料库
+        if success:
             self._prompt_save_to_library(success)
 
-    def _on_canceled(self) -> None:
-        """解析被用户停止时恢复界面状态。"""
-        self._parse_canceled = True
-        if self._loading:
-            self._loading.hide_mask()
-        self._set_running(False)
-        self.progress_label.setText("已停止")
-        show_toast("已停止解析", "warn", parent=self.window())
+    # ================= 删除解析报告（保留文献） =================
+
+    def _delete_report(self) -> None:
+        """二次确认后仅删除当前文献的解析报告。
+
+        只清空结构化解析结果并把文献状态回到“未解析”，文献记录、源文件
+        与笔记批注保留，文献仍在选择下拉中，可立即重新解析。
+        """
+        lit_id = self.current_lit_id()
+        if not lit_id or self._worker is not None:
+            return
+        title = (self.combo_lit.currentText() or "").strip() or f"文献{lit_id}"
+        confirmed = ConfirmDialog.confirm(
+            self,
+            title="删除解析报告",
+            content=(
+                f"确定删除「{title}」的解析报告吗？\n\n"
+                "· 仅清空结构化解析结果，文献记录、源文件与笔记批注保留；\n"
+                "· 文献状态将回到「未解析」，仍可在上方下拉中选中并重新解析；\n"
+                "· 此操作不可恢复。"
+            ),
+            confirm_text="删除报告",
+            danger=True,
+        )
+        if not confirmed:
+            return
+        code, _data, msg = self._parse_service.clear_report(lit_id)
+        if code != C.CODE_SUCCESS:
+            show_toast(msg or "删除解析报告失败", "error",
+                       parent=self.window())
+            return
+        self.progress_label.setText("报告已删除，等待重新解析")
+        show_toast("解析报告已删除，文献已保留", "success",
+                   parent=self.window())
+        self.refresh()
 
     # ================= 保存报告到资料库 =================
 
@@ -502,7 +558,7 @@ class ParsePage(QWidget):
         """按运行状态切换按钮与进度条展示。"""
         self.btn_parse.setEnabled(not running)
         self.btn_reparse.setEnabled(not running and self._has_report)
-        self.btn_stop.setEnabled(running)
+        self.btn_delete_report.setEnabled(not running and self._has_report)
         self.combo_lit.setEnabled(not running)
 
     # ================= 报告块渲染 =================
@@ -523,6 +579,9 @@ class ParsePage(QWidget):
         )
         self.blocks["basic"].set_text(basic)
         for field, _title, _highlight in BLOCKS[1:]:
+            if field not in self._enabled_dimensions:
+                # 该维度在当前默认规则中已停用：不填充也不展开
+                continue
             content = (report.get(field) or "").strip()
             self.blocks[field].set_text(content or "（未识别到该部分内容）")
             if content:

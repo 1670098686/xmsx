@@ -1,813 +1,1398 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>文献阅读整理Agent - UI原型</title>
-    <style>
-        :root {
-            /* 浅色主题变量 */
-            --bg-main: #ffffff;
-            --bg-sidebar: #F5F7FA;
-            --bg-card: #ffffff;
-            --bg-upload: #ffffff;
-            --primary: #E8F4F8;
-            --text-title: #1D2129;
-            --text-body: #1D2129;
-            --text-aux: #86909C;
-            --border: #E5E6EB;
-            --success: #52C41A;
-            --warn: #FAAD14;
-            --error: #FF4D4F;
-            --shadow: rgba(0,0,0,0.06);
-        }
-        [data-theme="dark"] {
-            /* 深色主题变量 */
-            --bg-main: #1F2937;
-            --bg-sidebar: #273444;
-            --bg-card: #273444;
-            --bg-upload: #273444;
-            --primary: #E8F4F8;
-            --text-title: #F9FAFB;
-            --text-body: #F9FAFB;
-            --text-aux: #9CA3AF;
-            --border: #374151;
-            --shadow: rgba(0,0,0,0.25);
-        }
-        * {
-            margin:0;
-            padding:0;
-            box-sizing: border-box;
-            font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
-        }
-        body {
-            height:100vh;
-            overflow:hidden;
-            background: var(--bg-main);
-            color: var(--text-body);
-            display:flex;
-            flex-direction:column;
-        }
-        /* 顶部全局导航栏 40px */
-        .app-header {
-            height:40px;
-            background: var(--bg-sidebar);
-            border-bottom:1px solid var(--border);
-            display:flex;
-            align-items:center;
-            justify-content:space-between;
-            padding:0 12px;
-            flex-shrink:0;
-        }
-        .header-left {
-            display:flex;
-            align-items:center;
-            gap:8px;
-            font-weight:bold;
-            color:var(--text-title);
-        }
-        .header-icon {
-            width:20px;
-            height:20px;
-            display:inline-flex;
-            align-items:center;
-            justify-content:center;
-        }
-        .header-right {
-            display:flex;
-            gap:4px;
-        }
-        .win-btn {
-            width:28px;
-            height:28px;
-            border-radius:4px;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            cursor:pointer;
-            color:var(--text-aux);
-        }
-        .win-btn:hover {
-            background:rgba(128,128,128,0.12);
-            color:var(--text-title);
-        }
-        /* 主体容器：左侧导航 + 右侧内容 */
-        .app-body {
-            display:flex;
-            flex:1;
-            overflow:hidden;
-        }
-        /* 左侧固定导航栏 220px */
-        .sidebar {
-            width:220px;
-            background:var(--bg-sidebar);
-            border-right:1px solid var(--border);
-            flex-shrink:0;
-            overflow-y:auto;
-            padding:12px 0;
-        }
-        .nav-item {
-            padding:9px 16px;
-            display:flex;
-            align-items:center;
-            gap:10px;
-            cursor:pointer;
-            font-size:14px;
-            color:var(--text-body);
-        }
-        .nav-item:hover {
-            background:rgba(0,0,0,0.05);
-        }
-        .nav-item.active {
-            background:var(--primary);
-            color:#1D2129;
-        }
-        .nav-fold-header {
-            padding:9px 16px;
-            display:flex;
-            align-items:center;
-            justify-content:space-between;
-            cursor:pointer;
-            font-size:14px;
-        }
-        .nav-fold-body {
-            padding-left:28px;
-            display:none;
-        }
-        .nav-fold-body.open {
-            display:block;
-        }
-        .nav-sub-item {
-            padding:7px 12px;
-            font-size:13px;
-            cursor:pointer;
-            color:var(--text-aux);
-        }
-        .nav-sub-item:hover {
-            background:rgba(0,0,0,0.05);
-            color:var(--text-body);
-        }
-        /* 右侧主内容区 */
-        .main-content {
-            flex:1;
-            overflow:auto;
-            padding:20px;
-        }
-        .page {
-            display:none;
-        }
-        .page.active {
-            display:block;
-        }
-        /* 通用组件 */
-        .btn {
-            padding:7px 14px;
-            border-radius:6px;
-            border:1px solid var(--border);
-            background:var(--bg-card);
-            color:var(--text-body);
-            cursor:pointer;
-            font-size:13px;
-        }
-        .btn-primary {
-            background:var(--primary);
-            border-color:#c7e4ec;
-            color:#111827;
-        }
-        .btn:hover {
-            opacity:0.9;
-        }
-        .card {
-            background:var(--bg-card);
-            border:1px solid var(--border);
-            border-radius:8px;
-            padding:16px;
-        }
-        .gap-row {
-            display:flex;
-            gap:10px;
-            margin-bottom:16px;
-            flex-wrap:wrap;
-        }
-        .tip-text {
-            color:var(--text-aux);
-            font-size:12px;
-        }
-        /* 文献导入页面 */
-        .upload-box {
-            border:2px dashed var(--border);
-            border-radius:10px;
-            min-height:220px;
-            display:flex;
-            flex-direction:column;
-            align-items:center;
-            justify-content:center;
-            gap:10px;
-            padding:20px;
-            margin-bottom:20px;
-        }
-        .table-wrap {
-            border:1px solid var(--border);
-            border-radius:8px;
-            overflow:hidden;
-        }
-        table {
-            width:100%;
-            border-collapse:collapse;
-        }
-        th,td {
-            padding:10px 12px;
-            text-align:left;
-            border-bottom:1px solid var(--border);
-            font-size:13px;
-        }
-        th {
-            background:var(--bg-sidebar);
-        }
-        .status-success {color:var(--success)}
-        .status-warn {color:var(--warn)}
-        .status-error {color:var(--error)}
-        /* 文献解析页面布局：左右分栏 */
-        .parse-container {
-            display:grid;
-            grid-template-columns: 1fr 1fr;
-            gap:16px;
-            height:calc(100vh - 180px);
-        }
-        .parse-viewer {
-            border:1px solid var(--border);
-            border-radius:8px;
-            padding:12px;
-            overflow:auto;
-        }
-        .parse-report {
-            border:1px solid var(--border);
-            border-radius:8px;
-            padding:12px;
-            overflow:auto;
-        }
-        .collapse-block {
-            border:1px solid var(--border);
-            border-radius:6px;
-            margin-bottom:8px;
-        }
-        .collapse-head {
-            padding:8px 12px;
-            cursor:pointer;
-            background:var(--bg-sidebar);
-        }
-        .collapse-body {
-            padding:10px 12px;
-            display:none;
-        }
-        .collapse-body.open {
-            display:block;
-        }
-        .highlight-block {
-            background:var(--primary);
-            padding:6px 8px;
-            border-radius:4px;
-        }
-        /* 文献检索页面 */
-        .search-bar {
-            display:flex;
-            gap:10px;
-            margin-bottom:16px;
-        }
-        input[type="text"], select {
-            padding:8px 10px;
-            border:1px solid var(--border);
-            border-radius:6px;
-            background:var(--bg-card);
-            color:var(--text-body);
-        }
-        .doc-card-list {
-            display:grid;
-            grid-template-columns: repeat(auto-fill, minmax(260px,1fr));
-            gap:12px;
-        }
-        .doc-card {
-            border:1px solid var(--border);
-            border-radius:8px;
-            padding:12px;
-        }
-        .doc-card:hover {
-            box-shadow:0 2px 8px var(--shadow);
-        }
-        .tag {
-            display:inline-block;
-            font-size:11px;
-            padding:2px 6px;
-            border-radius:4px;
-            background:var(--primary);
-            margin:2px;
-        }
-        .empty-tip {
-            text-align:center;
-            padding:40px;
-            color:var(--text-aux);
-        }
-        /* 笔记批注页面：左右阅读+编辑 */
-        .note-container {
-            display:grid;
-            grid-template-columns: 1fr 0.85fr;
-            gap:16px;
-            height:calc(100vh - 180px);
-        }
-        .note-read-area {
-            border:1px solid var(--border);
-            border-radius:8px;
-            padding:14px;
-            overflow:auto;
-        }
-        .note-edit-area {
-            border:1px solid var(--border);
-            border-radius:8px;
-            display:flex;
-            flex-direction:column;
-        }
-        .note-tab-bar {
-            display:flex;
-            border-bottom:1px solid var(--border);
-        }
-        .note-tab {
-            padding:9px 14px;
-            cursor:pointer;
-            font-size:13px;
-        }
-        .note-tab.active {
-            border-bottom:2px solid #4096bb;
-        }
-        .note-textarea {
-            flex:1;
-            background:transparent;
-            border:none;
-            padding:12px;
-            color:var(--text-body);
-            resize:none;
-            outline:none;
-        }
-        /* 管理中心页面 */
-        .setting-group {
-            margin-bottom:24px;
-        }
-        .setting-group h4 {
-            margin-bottom:10px;
-        }
-        .setting-row {
-            display:flex;
-            align-items:center;
-            gap:10px;
-            margin:8px 0;
-        }
-        /* 弹窗模态框 */
-        .modal-mask {
-            position:fixed;
-            inset:0;
-            background:rgba(0,0,0,0.4);
-            display:none;
-            align-items:center;
-            justify-content:center;
-            z-index:99;
-        }
-        .modal-mask.open {
-            display:flex;
-        }
-        .modal-box {
-            background:var(--bg-card);
-            border-radius:8px;
-            border:1px solid var(--border);
-            min-width:340px;
-            max-width:90vw;
-            padding:20px;
-        }
-        .modal-footer {
-            display:flex;
-            justify-content:flex-end;
-            gap:8px;
-            margin-top:16px;
-        }
-        /* toast提示 */
-        .toast-wrap {
-            position:fixed;
-            top:50px;
-            left:50%;
-            transform:translateX(-50%);
-            z-index:100;
-        }
-        .toast-item {
-            background:#222;
-            color:#fff;
-            padding:8px 16px;
-            border-radius:6px;
-            margin:4px 0;
-            font-size:13px;
-        }
-        /* loading */
-        .loading-text {
-            color:var(--text-aux);
-        }
-    </style>
+<meta charset="UTF-8">
+<title>文献阅读整理 Agent — 原型模板</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!--
+  本原型严格对齐 PyQt5 真实 UI：
+  - 主题变量：config/global_config.py THEME_LIGHT / THEME_DARK
+  - QSS 样式：resources/qss/light.qss（500 行模板转 CSS）
+  - 布局：main_window.py + 各 page 类的 _build_ui() 方法
+  - 按钮文案：直接取自 PyQt5 代码字符串（非规划文档描述）
+  - CollapseBlock 标题：parse_page.py BLOCKS 常量
+-->
+<style>
+/* =========================================================
+   全局主题变量（与 config/global_config.py 完全一致）
+   ========================================================= */
+:root {
+  /* 浅色主题（THEME_LIGHT） */
+  --bg_main:         #ffffff;
+  --bg_sidebar:      #F5F7FA;
+  --bg_card:         #ffffff;
+  --bg_alt:          #F5F8FA;
+  --bg_input:        #ffffff;
+  --primary:         #E8F4F8;
+  --primary_border:  #c7e4ec;
+  --primary_text:    #111827;
+  --text_title:      #1D2129;
+  --text_body:       #1D2129;
+  --text_aux:        #86909C;
+  --border:          #E5E6EB;
+  --info:            #4096BB;
+  --success:         #52C41A;
+  --warn:            #FAAD14;
+  --error:           #FF4D4F;
+  --hover_overlay:   rgba(0,0,0,.05);
+  --mask_overlay:    rgba(0,0,0,.40);
+}
+[data-theme="dark"] {
+  --bg_main:         #1F2937;
+  --bg_sidebar:      #273444;
+  --bg_card:         #273444;
+  --bg_alt:          #202B3A;
+  --bg_input:        #1F2937;
+  --primary:         #E8F4F8;
+  --primary_border:  #c7e4ec;
+  --primary_text:    #111827;
+  --text_title:      #F9FAFB;
+  --text_body:       #F9FAFB;
+  --text_aux:        #9CA3AF;
+  --border:          #374151;
+  --info:            #4096BB;
+  --success:         #52C41A;
+  --warn:            #FAAD14;
+  --error:           #FF4D4F;
+  --hover_overlay:   rgba(255,255,255,.08);
+  --mask_overlay:    rgba(0,0,0,.55);
+}
+
+/* 全局重置 + 字体（对齐 FONT_FAMILY） */
+* { box-sizing: border-box; margin: 0; padding: 0; outline: none; }
+html, body {
+  height: 100%;
+  font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  font-size: 14px;
+  color: var(--text_body);
+  background: var(--bg_main);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* =========================================================
+   应用主容器（FramelessWindowHint 无边框）
+   ========================================================= */
+.app {
+  display: flex; flex-direction: column;
+  height: 100vh; width: 100vw; overflow: hidden;
+  background: var(--bg_main);
+}
+
+/* 顶部导航栏 — QFrame#appHeader，固定 HEADER_HEIGHT=40px */
+.header {
+  height: 40px; flex-shrink: 0;
+  background: var(--bg_sidebar);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center;
+  padding: 0 8px 0 12px;
+  gap: 8px;
+  user-select: none;
+}
+.header .logo { font-size: 16px; }
+.header .title {
+  color: var(--text_title);
+  font-size: 15px; font-weight: bold;
+}
+.header .spacer { flex: 1; }
+/* QToolButton#winBtn — 固定 28x28 */
+.header .win-btn {
+  width: 28px; height: 28px;
+  border: none; border-radius: 4px;
+  background: transparent; color: var(--text_aux);
+  font-size: 13px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .12s, color .12s;
+}
+.header .win-btn:hover { background: var(--hover_overlay); color: var(--text_title); }
+.header .win-btn.close:hover { background: var(--error); color: #ffffff; }
+
+/* 主体 */
+.body { flex: 1; display: flex; overflow: hidden; }
+
+/* =========================================================
+   左侧导航 — QFrame#sidebar，SIDEBAR_WIDTH=220px
+   ========================================================= */
+.sidebar {
+  width: 220px; flex-shrink: 0;
+  background: var(--bg_sidebar);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  padding: 12px 0;
+  overflow-y: auto;
+}
+/* QListWidget#navList::item — 高度 46px，font-size 15px bold */
+.nav-item {
+  height: 46px; line-height: 46px;
+  padding: 0 16px;
+  font-size: 15px; font-weight: bold;
+  color: var(--text_body);
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  transition: background .12s;
+  display: flex; align-items: center; gap: 8px;
+}
+.nav-item:hover { background: var(--hover_overlay); }
+.nav-item.active {
+  background: var(--primary);
+  color: var(--primary_text);
+  border-left-color: var(--primary_border);
+}
+.nav-item .icon { width: 20px; text-align: center; font-size: 16px; }
+
+/* 折叠菜单（QFrame#foldMenu）— 与主导航无缝衔接 */
+.fold-header {
+  height: 46px; line-height: 46px;
+  padding: 0 16px;
+  font-size: 15px; font-weight: bold;
+  color: var(--text_body);
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+  transition: background .12s;
+}
+.fold-header:hover { background: var(--hover_overlay); }
+.fold-header .chev { margin-left: auto; font-size: 10px; color: var(--text_aux); transition: transform .2s; }
+.fold-header.open .chev { transform: rotate(90deg); }
+
+.fold-sub { display: none; }
+.fold-header.open + .fold-sub { display: block; }
+/* QToolButton#foldSubItem — 高度 42px，font-size 14px，padding-left:36px 缩进 */
+.fold-sub-item {
+  height: 42px; line-height: 42px;
+  padding: 0 16px 0 36px;
+  font-size: 14px;
+  color: var(--text_body);
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  transition: background .12s;
+}
+.fold-sub-item:hover { background: var(--hover_overlay); color: var(--text_title); }
+.fold-sub-item.active {
+  background: var(--primary);
+  color: var(--primary_text);
+  border-left-color: var(--primary_border);
+}
+
+.sidebar-spacer { flex: 1; }
+
+/* =========================================================
+   右侧内容 — QStackedWidget
+   ========================================================= */
+.content {
+  flex: 1; overflow-y: auto;
+  background: var(--bg_main);
+  /* 页面 padding 在各 Page._build_ui() 里设 */
+}
+.page { display: none; }
+.page.active { display: block; }
+/* ParsePage padding(20,20,20,20) spacing 10px */
+.page-pad-20 { padding: 20px; }
+
+/* QLabel#pageTitle — font-size 18px bold */
+.page-title {
+  color: var(--text_title);
+  font-size: 18px; font-weight: bold;
+  margin-bottom: 10px;
+}
+.aux { color: var(--text_aux); font-size: 13px; }
+
+/* =========================================================
+   按钮 — QPushButton 全局
+   ========================================================= */
+.btn {
+  background: var(--bg_card);
+  color: var(--text_body);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: border-color .12s, background .12s, color .12s;
+  user-select: none;
+}
+.btn:hover { border-color: var(--primary_border); }
+.btn:disabled { color: var(--text_aux); background: var(--bg_sidebar); cursor: not-allowed; }
+/* QPushButton#btnPrimary */
+.btn-primary {
+  background: var(--primary); border-color: var(--primary_border);
+  color: var(--primary_text);
+}
+.btn-primary:hover { background: var(--primary_border); }
+/* QPushButton#btnDanger */
+.btn-danger {
+  background: var(--bg_card); border-color: var(--error); color: var(--error);
+}
+.btn-danger:hover { background: var(--error); color: #ffffff; }
+
+/* =========================================================
+   输入控件 — QLineEdit/QComboBox 全局
+   ========================================================= */
+select, input[type="text"], input[type="password"], input[type="number"],
+textarea {
+  background: var(--bg_input);
+  color: var(--text_body);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 14px;
+  outline: none;
+  font-family: inherit;
+}
+select:focus, input:focus, textarea:focus { border-color: var(--primary_border); }
+select { cursor: pointer; }
+
+/* =========================================================
+   表格 — QTableWidget
+   ========================================================= */
+.table {
+  width: 100%; border-collapse: collapse;
+  background: var(--bg_card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  overflow: hidden;
+}
+.table th, .table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.table th {
+  background: var(--bg_sidebar);
+  color: var(--text_title);
+  font-weight: bold;
+  border-right: 1px solid var(--border);
+}
+.table th:last-child { border-right: none; }
+.table tr:nth-child(even) td { background: var(--bg_alt); }
+
+/* =========================================================
+   卡片容器
+   ========================================================= */
+.card {
+  background: var(--bg_card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* =========================================================
+   UploadBox — QFrame#uploadBox
+   ========================================================= */
+.upload-box {
+  background: var(--bg_card);
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text_aux);
+  cursor: pointer;
+  transition: all .15s;
+}
+.upload-box:hover {
+  border-color: var(--primary_border);
+  color: var(--text_body);
+}
+.upload-box .icon { font-size: 32px; margin-bottom: 8px; }
+
+/* =========================================================
+   DocCard — QFrame#docCard
+   ========================================================= */
+.doc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.doc-card {
+  background: var(--bg_card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex; flex-direction: column; gap: 8px;
+  cursor: pointer;
+  transition: border-color .15s;
+}
+.doc-card:hover { border-color: var(--primary_border); }
+.doc-card .title-row {
+  display: flex; justify-content: space-between; gap: 8px;
+}
+.doc-card .card-title {
+  font-size: 14px; font-weight: bold;
+  color: var(--text_title);
+  word-break: break-all;
+}
+.doc-card .meta {
+  font-size: 14px; color: var(--text_aux);
+}
+/* QLabel#categoryLabel — 有 border + bold */
+.cat-label {
+  display: inline-block;
+  background: var(--primary); color: var(--primary_text);
+  border: 1px solid var(--primary_border);
+  border-radius: 4px;
+  padding: 1px 6px; font-size: 12px; font-weight: bold;
+  margin-right: 4px;
+}
+/* QLabel#tagLabel */
+.tag-label {
+  display: inline-block;
+  background: var(--primary); color: var(--primary_text);
+  border-radius: 4px;
+  padding: 2px 6px; font-size: 12px;
+  margin-right: 4px;
+}
+/* QLabel#parsedLabel — 绿色底白字 bold */
+.parsed-label {
+  background: var(--success); color: #ffffff;
+  border-radius: 4px;
+  padding: 1px 6px; font-size: 12px; font-weight: bold;
+  height: fit-content;
+  line-height: 18px;
+}
+.doc-card .actions {
+  display: flex; gap: 6px;
+}
+.doc-card .actions .btn { padding: 6px 12px; font-size: 14px; }
+
+/* =========================================================
+   CollapseBlock — QFrame#collapseBlock
+   ========================================================= */
+.collapse {
+  background: var(--bg_card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+/* QToolButton#collapseHead */
+.collapse-head {
+  background: var(--bg_sidebar);
+  border: none;
+  padding: 8px 12px;
+  font-size: 14px;
+  display: flex; align-items: center; gap: 8px;
+  cursor: pointer;
+  color: var(--text_body);
+  width: 100%; text-align: left;
+}
+.collapse-head .chev { margin-left: auto; font-size: 10px; color: var(--text_aux); transition: transform .2s; }
+.collapse.open .collapse-head .chev { transform: rotate(90deg); }
+/* QFrame#highlightBlock — 与普通一致，不使用浅蓝高亮底
+   parse_page.py 第 248 行注释：
+   "创新点/结论不使用浅蓝高亮底，与普通折叠块保持一致，避免突兀"
+*/
+.collapse.open .collapse-body { display: block; }
+.collapse-body {
+  display: none;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--text_body);
+  line-height: 1.8;
+  font-size: 14px;
+}
+
+/* =========================================================
+   Splitter — QSplitter::handle 1px 分割线
+   ========================================================= */
+.splitter {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+}
+.splitter > div { min-height: 0; }
+.splitter-handle {
+  background: var(--border);
+  width: 1px;
+}
+.block-title {
+  color: var(--text_title);
+  font-size: 14px; font-weight: bold;
+  margin-bottom: 6px;
+}
+
+/* =========================================================
+   进度条 — QProgressBar，8px 高
+   ========================================================= */
+.progress-wrap { display: flex; align-items: center; gap: 10px; }
+.progress {
+  flex: 1;
+  height: 8px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.progress .bar {
+  height: 100%;
+  width: 65%;
+  background: var(--success);
+  border-radius: 3px;
+  transition: width .3s;
+}
+.progress-label { font-size: 14px; color: var(--text_aux); }
+
+/* =========================================================
+   滚动条 — QScrollBar，10px 宽
+   ========================================================= */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+  min-height: 24px;
+  min-width: 24px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text_aux); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* =========================================================
+   Toast — QFrame#toastItem
+   ========================================================= */
+.toast {
+  position: fixed; top: 56px; left: 50%;
+  transform: translateX(-50%);
+  background: #222222;
+  border-radius: 6px;
+  padding: 8px 16px;
+  color: #ffffff; font-size: 13px;
+  display: none; z-index: 2000;
+  box-shadow: 0 4px 12px rgba(0,0,0,.25);
+}
+.toast.show { display: block; animation: toastIn .18s ease-out; }
+@keyframes toastIn { from { opacity:0; transform: translate(-50%,-8px); } to { opacity:1; transform: translate(-50%,0); } }
+
+/* =========================================================
+   Dialog
+   ========================================================= */
+.mask {
+  position: fixed; inset: 0;
+  background: var(--mask_overlay);
+  display: none; align-items: center; justify-content: center;
+  z-index: 3000;
+}
+.mask.show { display: flex; }
+.modal {
+  background: var(--bg_card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 24px;
+  min-width: 420px; max-width: 520px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.18);
+}
+.modal h3 { color: var(--text_title); font-size: 15px; font-weight: bold; margin-bottom: 10px; }
+.modal .msg { color: var(--text_body); font-size: 14px; line-height: 1.7; margin-bottom: 16px; }
+.modal .actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* =========================================================
+   DonutChart — 纯 CSS conic-gradient
+   ========================================================= */
+.donut-wrap {
+  display: flex; gap: 32px; align-items: center;
+  padding: 20px;
+  background: var(--bg_card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.donut {
+  width: 180px; height: 180px; border-radius: 50%;
+  background: conic-gradient(
+    #4A90D9 0% 30%, #52C41A 30% 36%, #FAAD14 36% 37.5%,
+    #9254DE 37.5% 42%, #8C8C8C 42% 45%
+  );
+  position: relative; flex-shrink: 0;
+}
+.donut::before {
+  content: ""; position: absolute;
+  inset: 20px; border-radius: 50%;
+  background: var(--bg_card);
+}
+.donut-center {
+  position: absolute; inset: 20px;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  text-align: center; z-index: 1;
+}
+.donut-center .total { font-size: 18px; font-weight: bold; color: var(--text_title); }
+.donut-center .label { font-size: 11px; color: var(--text_aux); margin-top: 2px; }
+
+.legend { flex: 1; min-width: 180px; }
+.legend-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 14px; margin-bottom: 6px;
+}
+.legend-row .swatch { width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+.legend-row .pct { color: var(--text_aux); margin-left: auto; font-size: 12px; }
+
+/* =========================================================
+   状态文字 — QLabel.rowStatus
+   ========================================================= */
+.status-success { color: var(--success); }
+.status-warn    { color: var(--warn); }
+.status-error   { color: var(--error); }
+
+/* =========================================================
+   空状态 — QFrame#emptyBox
+   ========================================================= */
+.empty { text-align: center; padding: 60px 20px; color: var(--text_aux); }
+.empty .icon { font-size: 36px; margin-bottom: 8px; }
+.empty .text { font-size: 14px; }
+.empty .btn { margin-top: 14px; }
+
+/* =========================================================
+   设置页表单
+   ========================================================= */
+.form-group { margin-bottom: 24px; }
+.form-group h3 {
+  font-size: 15px; font-weight: bold;
+  color: var(--text_title);
+  padding-bottom: 10px; margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.form-row {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 12px;
+}
+.form-row label {
+  color: var(--text_body); font-size: 14px;
+  width: 110px; flex-shrink: 0;
+}
+.form-row input, .form-row select { flex: 1; max-width: 340px; }
+.form-row .eye-btn {
+  padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg_card); cursor: pointer;
+}
+
+/* 设置页容器卡 */
+.setting-card {
+  background: var(--bg_card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+}
+
+/* 批量操作栏 */
+.batch-bar {
+  background: var(--bg_card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  display: flex; align-items: center; gap: 10px;
+}
+.batch-bar label { color: var(--text_body); font-size: 14px; display: flex; align-items: center; gap: 4px; }
+.batch-bar .spacer { flex: 1; }
+
+/* =========================================================
+   伪 PDF / 文本预览区
+   ========================================================= */
+.viewer-placeholder {
+  background: var(--bg_input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-height: 400px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text_aux);
+  flex-direction: column; gap: 6px;
+}
+.viewer-placeholder .big-icon { font-size: 48px; }
+.viewer-placeholder .hint { font-size: 12px; color: var(--text_aux); }
+
+/* 批注页工具条 */
+.mark-toolbar {
+  background: var(--bg_sidebar);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  margin-bottom: 8px;
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.mark-toolbar .btn { padding: 5px 10px; font-size: 14px; }
+
+/* 批注列表 */
+.note-list {
+  background: var(--bg_card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 200px; overflow-y: auto;
+}
+.note-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  cursor: pointer;
+}
+.note-item:last-child { border-bottom: none; }
+.note-item:hover { background: var(--hover_overlay); }
+.note-item.active { background: var(--primary); }
+.note-item .preview { color: var(--text_aux); font-size: 12px; margin-top: 2px; }
+
+/* 批注编辑区 */
+.note-editor {
+  margin-top: 10px;
+  min-height: 160px;
+  background: var(--bg_input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+}
+.note-editor:focus { border-color: var(--primary_border); }
+
+/* 备份表格 */
+.backup-table {
+  width: 100%; border-collapse: collapse;
+  background: var(--bg_card);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.backup-table th, .backup-table td {
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  font-size: 14px; text-align: left;
+}
+.backup-table th {
+  background: var(--bg_sidebar); font-weight: bold;
+  color: var(--text_title);
+}
+
+/* 标签管理 */
+.tag-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 10px;
+}
+.tag-card {
+  background: var(--bg_card); border: 1px solid var(--border);
+  border-radius: 6px; padding: 10px; text-align: center;
+}
+.tag-card .dot { width: 16px; height: 16px; border-radius: 3px; margin: 0 auto 6px; }
+.tag-card .name { font-size: 14px; color: var(--text_title); }
+.tag-card .count { font-size: 12px; color: var(--text_aux); margin-top: 2px; }
+
+.cat-tree { font-size: 14px; }
+.cat-tree .cat {
+  padding: 7px 10px; cursor: pointer;
+  border-radius: 4px;
+  display: flex; align-items: center; gap: 6px;
+}
+.cat-tree .cat:hover { background: var(--hover_overlay); }
+.cat-tree .cat .chev { font-size: 9px; color: var(--text_aux); width: 12px; }
+.cat-tree .cat.child { padding-left: 32px; }
+
+/* 分类/标签双栏布局 */
+.split-2col { display: grid; grid-template-columns: 240px 1fr; gap: 16px; }
+
+/* 设置备份按钮栏 */
+.action-bar { display: flex; gap: 8px; margin-bottom: 14px; }
+
+/* AI 校验结果弹窗专用样式 */
+.probe-row {
+  display: flex; justify-content: space-between;
+  padding: 8px 0; font-size: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.probe-row:last-child { border-bottom: none; }
+.probe-row .status { font-weight: bold; }
+.probe-row .status.ok { color: var(--success); }
+.probe-row .status.fail { color: var(--error); }
+.probe-row .note { color: var(--text-aux); font-size: 12px; }
+
+/* 全局 Toast 区域 */
+.bottom-actions { display: flex; gap: 8px; margin-top: 12px; }
+</style>
 </head>
 <body>
-    <!-- 顶部栏 -->
-    <div class="app-header">
-        <div class="header-left">
-            <span class="header-icon">📖</span>
-            <span>文献阅读整理Agent</span>
-        </div>
-        <div class="header-right">
-            <div class="win-btn" id="toggleTheme">🌓</div>
-            <div class="win-btn">─</div>
-            <div class="win-btn">□</div>
-            <div class="win-btn">✕</div>
-        </div>
+<div class="app">
+
+  <!-- ========== 顶部导航 ========== -->
+  <div class="header">
+    <span class="logo">📖</span>
+    <span class="title">文献阅读整理Agent</span>
+    <div class="spacer"></div>
+    <button class="win-btn" title="切换主题" id="btnTheme">🌓</button>
+    <button class="win-btn" title="最小化">─</button>
+    <button class="win-btn" title="最大化">□</button>
+    <button class="win-btn close" title="关闭">✕</button>
+  </div>
+
+  <!-- ========== 主体 ========== -->
+  <div class="body">
+
+    <!-- 左侧导航 220px -->
+    <div class="sidebar" id="sidebar">
+      <div class="nav-item active" data-page="import"><span class="icon">📥</span>文献导入</div>
+      <div class="nav-item" data-page="parse"><span class="icon">🔍</span>文献解析</div>
+      <div class="nav-item" data-page="search"><span class="icon">📚</span>文献检索</div>
+      <div class="nav-item" data-page="note"><span class="icon">✏️</span>笔记批注</div>
+
+      <div class="fold-header" id="settingFold">⚙️ 管理中心 <span class="chev">▶</span></div>
+      <div class="fold-sub">
+        <div class="fold-sub-item" data-page="setting-rules">解析规则配置</div>
+        <div class="fold-sub-item" data-page="setting-storage">存储路径配置</div>
+        <div class="fold-sub-item" data-page="setting-ai">AI模型配置</div>
+        <div class="fold-sub-item" data-page="setting-backup">资料导出备份</div>
+        <div class="fold-sub-item" data-page="setting-tag">标签管理</div>
+      </div>
+
+      <div class="sidebar-spacer"></div>
     </div>
 
-    <div class="app-body">
-        <!-- 左侧导航 -->
-        <div class="sidebar">
-            <div class="nav-item active" data-page="page-import">
-                <span>📥</span>
-                <span>文献导入</span>
-            </div>
-            <div class="nav-item" data-page="page-parse">
-                <span>🔍</span>
-                <span>文献解析</span>
-            </div>
-            <div class="nav-item" data-page="page-search">
-                <span>📚</span>
-                <span>文献检索</span>
-            </div>
-            <div class="nav-item" data-page="page-note">
-                <span>✏️</span>
-                <span>笔记批注</span>
-            </div>
+    <!-- 右侧内容 QStackedWidget -->
+    <div class="content" id="content">
 
-            <div class="nav-fold-header" id="foldManage">
-                <span>⚙️ 管理中心</span>
-            </div>
-            <div class="nav-fold-body" id="foldManageBody">
-                <div class="nav-sub-item" data-page="page-setting">系统设置</div>
-                <div class="nav-sub-item" data-page="page-setting">资料导出备份</div>
-                <div class="nav-sub-item" data-page="page-setting">标签管理</div>
-            </div>
+      <!-- ========== Page 1：文献导入 ========== -->
+      <div class="page page-pad-20 active" id="page-import">
+        <div class="page-title">文献导入</div>
+        <div class="aux" style="margin-bottom:14px;">支持拖拽文件到下方区域，或点击按钮选择；系统自动 hash 去重。</div>
+
+        <!-- UploadBox -->
+        <div class="upload-box">
+          <div class="icon">📂</div>
+          <div style="font-size:14px;color:var(--text-body);">拖拽 PDF / TXT / Word 文献至此导入</div>
+          <div style="font-size:12px;margin-top:6px;">或点击下方按钮选择文件</div>
+          <button class="btn btn-primary" style="margin-top:16px;">选择文件</button>
         </div>
 
-        <!-- 右侧主内容区 -->
-        <div class="main-content">
-            <!-- 1 文献导入页面 -->
-            <div class="page active" id="page-import">
-                <h3>文献导入</h3>
-                <p class="tip-text">支持 PDF / TXT / DOC / DOCX，支持拖拽上传与批量导入</p>
-                <div class="upload-box">
-                    <div style="font-size:32px;">📂</div>
-                    <div>拖拽PDF/TXT/Word文献至此导入</div>
-                    <button class="btn btn-primary">点击选择文件</button>
-                </div>
-
-                <div class="gap-row">
-                    <button class="btn">批量重新导入失败项</button>
-                    <button class="btn">清空失败记录</button>
-                    <button class="btn" id="openConfirmModal">清空全部导入记录</button>
-                </div>
-
-                <div class="table-wrap">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>文件名</th>
-                                <th>格式</th>
-                                <th>导入时间</th>
-                                <th>状态</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td>深度学习综述.pdf</td>
-                                <td>PDF</td>
-                                <td>2026‑09‑10</td>
-                                <td><span class="status-success">导入成功</span></td>
-                                <td><button class="btn">预览</button> <button class="btn">加入资料库</button></td>
-                            </tr>
-                            <tr>
-                                <td>实验报告.docx</td>
-                                <td>DOCX</td>
-                                <td>2026‑09‑10</td>
-                                <td><span class="status-warn">导入中 68%</span></td>
-                                <td><button class="btn">取消</button></td>
-                            </tr>
-                            <tr>
-                                <td>损坏文献.pdf</td>
-                                <td>PDF</td>
-                                <td>2026‑09‑10</td>
-                                <td><span class="status-error">导入失败：文件损坏</span></td>
-                                <td><button class="btn">重新导入</button></td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- 2 文献解析页面 -->
-            <div class="page" id="page-parse">
-                <h3>文献解析</h3>
-                <div class="gap-row">
-                    <select>
-                        <option>选择资料库文献：深度学习综述.pdf</option>
-                    </select>
-                    <button class="btn btn-primary">开始解析</button>
-                    <button class="btn">停止解析</button>
-                    <button class="btn">重新解析</button>
-                </div>
-                <div style="margin-bottom:10px;">进度条：<div style="height:6px;background:var(--border);border-radius:3px;width:100%;"><div style="width:42%;height:100%;background:#52C41A;border-radius:3px;"></div></div></div>
-
-                <div class="parse-container">
-                    <div class="parse-viewer">
-                        <h4>文献预览区</h4>
-                        <p class="tip-text">原文阅读，基础翻页缩放功能</p>
-                        <div style="margin-top:12px;">
-                            <p>【论文标题】深度学习在计算机视觉中的应用综述</p>
-                            <p>摘要：随着深度学习技术快速发展，其在视觉任务中取得大量突破……</p>
-                            <p>……（模拟PDF原文内容）……</p>
-                        </div>
-                    </div>
-                    <div class="parse-report">
-                        <h4>结构化解析报告</h4>
-                        <div class="collapse-block">
-                            <div class="collapse-head toggle-collapse">📄 文献基础信息 ▼</div>
-                            <div class="collapse-body open">
-                                <div>标题：深度学习在计算机视觉中的应用综述</div>
-                                <div>作者：XXX</div>
-                                <div>发表时间：2025</div>
-                            </div>
-                        </div>
-                        <div class="collapse-block">
-                            <div class="collapse-head toggle-collapse">🧠 研究背景 ▼</div>
-                            <div class="collapse-body open">
-                                传统机器视觉算法存在特征手工设计的局限，大数据与GPU算力推动深度学习发展。
-                            </div>
-                        </div>
-                        <div class="collapse-block">
-                            <div class="collapse-head toggle-collapse">⭐ 创新点 ▼</div>
-                            <div class="collapse-body open">
-                                <div class="highlight-block">梳理多类CNN变体模型优缺点；提出面向小样本场景改进思路。</div>
-                            </div>
-                        </div>
-                        <div class="collapse-block">
-                            <div class="collapse-head toggle-collapse">✅ 研究结论 ▼</div>
-                            <div class="collapse-body open">
-                                <div class="highlight-block">深度学习视觉仍面临小样本、可解释性两大核心挑战。</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="gap-row" style="margin-top:12px;">
-                    <button class="btn btn-primary">导出报告</button>
-                    <button class="btn">保存至资料库</button>
-                </div>
-            </div>
-
-            <!--3 文献检索页面 -->
-            <div class="page" id="page-search">
-                <h3>文献检索</h3>
-                <div class="search-bar">
-                    <input type="text" placeholder="输入关键词，检索标题/作者/正文/笔记">
-                    <select>
-                        <option>全部标签</option>
-                    </select>
-                    <select>
-                        <option>全部时间</option>
-                    </select>
-                    <button class="btn btn-primary">检索</button>
-                </div>
-
-                <div class="gap-row">
-                    <button class="btn">批量归类</button>
-                    <button class="btn">批量添加标签</button>
-                    <button class="btn">批量导出</button>
-                    <button class="btn">批量删除</button>
-                </div>
-
-                <div class="doc-card-list">
-                    <div class="doc-card">
-                        <div><strong>深度学习综述</strong></div>
-                        <div class="tip-text">作者：张三｜2025</div>
-                        <div>
-                            <span class="tag">综述</span>
-                            <span class="tag">计算机视觉</span>
-                        </div>
-                        <div class="gap-row" style="margin-top:8px;">
-                            <button class="btn">预览</button>
-                            <button class="btn">解析</button>
-                        </div>
-                    </div>
-                    <div class="doc-card">
-                        <div><strong>大模型可解释性研究</strong></div>
-                        <div class="tip-text">作者：李四｜2025</div>
-                        <div>
-                            <span class="tag">理论分析</span>
-                        </div>
-                        <div class="gap-row" style="margin-top:8px;">
-                            <button class="btn">预览</button>
-                            <button class="btn">解析</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!--4 笔记批注页面 -->
-            <div class="page" id="page-note">
-                <h3>笔记批注</h3>
-                <div class="gap-row">
-                    <button class="btn">保存</button>
-                    <button class="btn">撤销</button>
-                    <button class="btn">重做</button>
-                    <button class="btn">查看编辑历史</button>
-                    <button class="btn">显示/隐藏批注标记</button>
-                </div>
-                <div class="note-container">
-                    <div class="note-read-area">
-                        <div style="margin-bottom:8px;">
-                            <button class="btn">高亮</button>
-                            <button class="btn">加粗</button>
-                            <button class="btn">下划线</button>
-                        </div>
-                        <p>【论文段落1】随着深度学习技术快速发展，其在视觉任务中取得大量突破。<mark>该段落可选中添加批注</mark></p>
-                        <p>【论文段落2】传统机器视觉算法存在特征手工设计的局限，大数据与GPU算力推动深度学习发展。</p>
-                    </div>
-                    <div class="note-edit-area">
-                        <div class="note-tab-bar">
-                            <div class="note-tab active">段落批注</div>
-                            <div class="note-tab">全局笔记</div>
-                        </div>
-                        <textarea class="note-textarea" placeholder="在此编辑笔记，自动保存...">
-段落批注示例：
-这里记录对该段文献的理解、疑问、摘抄素材。
-                        </textarea>
-                    </div>
-                </div>
-            </div>
-
-            <!--5 管理中心页面 -->
-            <div class="page" id="page-setting">
-                <h3>管理中心</h3>
-                <div class="setting-group">
-                    <h4>解析规则配置</h4>
-                    <div class="setting-row">
-                        <span>预设模板：</span>
-                        <select>
-                            <option>通用模板</option>
-                            <option>文科</option>
-                            <option>理科</option>
-                            <option>工科</option>
-                        </select>
-                    </div>
-                    <div class="setting-row">
-                        <span>解析精度：</span>
-                        <select>
-                            <option>标准全面</option>
-                            <option>基础精简</option>
-                            <option>深度细化</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="setting-group">
-                    <h4>存储路径配置</h4>
-                    <div class="setting-row">
-                        <span>文献存储路径：</span>
-                        <input type="text" value="D:/AgentDocs/library">
-                        <button class="btn">浏览</button>
-                    </div>
-                    <div class="setting-row">
-                        <span>磁盘占用：</span>
-                        <span>已用 2.4GB / 总 100GB</span>
-                    </div>
-                    <div class="setting-row">
-                        <button class="btn">打开存储文件夹</button>
-                        <button class="btn">清理缓存</button>
-                    </div>
-                </div>
-
-                <div class="setting-group">
-                    <h4>AI模型配置</h4>
-                    <div class="setting-row">
-                        <span>选择模型：</span>
-                        <select>
-                            <option>Model‑A</option>
-                        </select>
-                    </div>
-                    <div class="setting-row">
-                        <span>API密钥：</span>
-                        <input type="password" placeholder="输入密钥">
-                    </div>
-                </div>
-
-                <div class="setting-group">
-                    <h4>备份与导出</h4>
-                    <div class="gap-row">
-                        <button class="btn btn-primary">一键全量备份</button>
-                        <button class="btn">增量备份</button>
-                    </div>
-                </div>
-
-                <div class="setting-group">
-                    <h4>标签管理</h4>
-                    <div class="gap-row">
-                        <button class="btn">新增标签</button>
-                        <button class="btn">套用学术预设标签模板</button>
-                    </div>
-                </div>
-            </div>
+        <!-- 操作按钮行 -->
+        <div style="display:flex;gap:8px;margin:14px 0;">
+          <button class="btn">重新导入失败项</button>
+          <button class="btn">清空失败记录</button>
+          <button class="btn btn-danger">清空全部导入记录</button>
         </div>
+
+        <!-- 导入表格 -->
+        <table class="table">
+          <thead>
+            <tr><th style="width:44%;">文件名</th><th style="width:10%;">格式</th><th style="width:18%;">导入时间</th><th style="width:10%;">状态</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>深度学习综述_v2.pdf</td><td>PDF</td><td>2026-10-05 09:12</td><td class="status-success">✅ 成功</td><td><button class="btn">预览</button> <button class="btn">资料库</button></td></tr>
+            <tr><td>Transformer注意力机制.txt</td><td>TXT</td><td>2026-10-05 09:13</td><td class="status-success">✅ 成功</td><td><button class="btn">预览</button> <button class="btn">资料库</button></td></tr>
+            <tr><td>联邦学习研究.docx</td><td>DOCX</td><td>2026-10-05 09:14</td><td class="status-warn">⏳ 导入中 70%</td><td><div class="progress" style="width:120px;display:inline-block;vertical-align:middle;"><div class="bar" style="width:70%"></div></div></td></tr>
+            <tr><td>加密无文本层.pdf</td><td>PDF</td><td>2026-10-05 09:15</td><td class="status-error">❌ 失败</td><td style="color:var(--text-aux);font-size:12px;">PDF 已加密或无文本层</td></tr>
+            <tr><td>CNN图像识别综述.pdf</td><td>PDF</td><td>—</td><td class="status-warn">待导入</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ========== Page 2：文献解析 ========== -->
+      <div class="page page-pad-20" id="page-parse">
+        <div class="page-title">文献解析</div>
+        <div class="aux" style="margin-bottom:14px;">选择文献后点击"开始解析"。支持 AI 解析和本地规则解析两种模式。</div>
+
+        <!-- 工具栏（对齐 parse_page.py _build_ui） -->
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
+          <label style="color:var(--text_body);font-size:14px;">选择文献：</label>
+          <select style="min-width:280px;flex:1;">
+            <option>✅ 深度学习综述_v2.pdf</option>
+            <option>Transformer注意力机制.txt</option>
+            <option>联邦学习研究.docx</option>
+          </select>
+          <button class="btn btn-primary">开始解析</button>
+          <button class="btn" disabled>重新解析</button>
+          <button class="btn" disabled>导出报告 ▾</button>
+          <button class="btn btn-danger" disabled>删除报告</button>
+        </div>
+
+        <!-- 进度条（页面内 QProgressBar，不是 LoadingMask） -->
+        <div class="progress-wrap" style="margin-bottom:10px;">
+          <div class="progress"><div class="bar" style="width:65%"></div></div>
+          <div class="progress-label">65% · 正在生成结构化报告...</div>
+        </div>
+
+        <!-- QSplitter 1:1 -->
+        <div class="splitter" style="gap:1px;">
+          <!-- 左：原文预览（QPlainTextEdit + PdfViewer QStackedWidget） -->
+          <div>
+            <div class="block-title">文献原文</div>
+            <div class="viewer-placeholder" style="min-height:420px;">
+              <div class="big-icon">📄</div>
+              <div style="font-size:14px;">PDF 应用内原貌浏览区</div>
+              <div class="hint">（PDF → PdfViewer PyMuPDF 渲染；TXT → QPlainTextEdit；DOC/DOCX → 本地转 PDF 后渲染）</div>
+            </div>
+          </div>
+
+          <!-- 右：结构化报告（7 CollapseBlock） -->
+          <div style="padding-left:6px;">
+            <div class="block-title">结构化解析报告</div>
+            <div style="max-height:460px;overflow-y:auto;">
+
+              <!-- BLOCKS 常量：[("basic", "文献基础信息", False), ...] -->
+              <div class="collapse">
+                <div class="collapse-head open" onclick="this.parentElement.classList.toggle('open')">
+                  📌 文献基础信息<span class="chev">▶</span>
+                </div>
+                <div class="collapse-body" style="display:block;">
+                  <div><b>标题：</b>深度学习综述</div>
+                  <div><b>作者：</b>Zhang San, Li Si</div>
+                  <div><b>来源：</b>IEEE Transactions on Neural Networks 2024</div>
+                  <div><b>格式：</b>PDF · <b>大小：</b>2.3 MB</div>
+                </div>
+              </div>
+              <div class="collapse">
+                <div class="collapse-head open" onclick="this.parentElement.classList.toggle('open')">
+                  📌 研究背景<span class="chev">▶</span>
+                </div>
+                <div class="collapse-body" style="display:block;">
+                  深度学习作为机器学习的重要分支，近年来在图像识别、自然语言处理等领域取得突破性进展。本综述系统梳理了从感知机到 Transformer 的发展脉络，重点分析了注意力机制...
+                </div>
+              </div>
+              <div class="collapse">
+                <div class="collapse-head" onclick="this.parentElement.classList.toggle('open')">
+                  📌 核心观点<span class="chev">▶</span>
+                </div>
+                <div class="collapse-body">"注意力机制是突破 CNN/RNN 局限性的关键架构" — 论文主张 Transformer 在长距离依赖建模上具有天然优势...
+                </div>
+              </div>
+              <div class="collapse">
+                <div class="collapse-head" onclick="this.parentElement.classList.toggle('open')">
+                  📌 研究方法<span class="chev">▶</span>
+                </div>
+                <div class="collapse-body">系统综述法：检索 2010-2024 年 Web of Science 索引文献 1200+ 篇，筛选 87 篇代表性论文进行结构化分析...
+                </div>
+              </div>
+              <!-- 注意：parse_page.py 第 248 行注释明确说明
+                   "创新点/结论不使用浅蓝高亮底，与普通折叠块保持一致，避免突兀" -->
+              <div class="collapse">
+                <div class="collapse-head open" onclick="this.parentElement.classList.toggle('open')">
+                  📌 创新点<span class="chev">▶</span>
+                </div>
+                <div class="collapse-body" style="display:block;">
+                  ① 提出"三大架构范式"分类体系（卷积/循环/注意力）<br>
+                  ② 首次给出各架构在 5 大任务上的基准对比表<br>
+                  ③ 总结 12 条可复用的架构设计原则
+                </div>
+              </div>
+              <div class="collapse">
+                <div class="collapse-head open" onclick="this.parentElement.classList.toggle('open')">
+                  📌 研究结论<span class="chev">▶</span>
+                </div>
+                <div class="collapse-body" style="display:block;">
+                  注意力机制已成为当前主流架构，但 CNN 在小样本视觉任务上仍具优势；未来研究方向为稀疏化与可解释性增强。
+                </div>
+              </div>
+              <div class="collapse">
+                <div class="collapse-head" onclick="this.parentElement.classList.toggle('open')">
+                  📌 参考文献<span class="chev">▶</span>
+                </div>
+                <div class="collapse-body">
+                  <b>关键词 TOP-20：</b><br>
+                  <span class="tag-label">深度学习</span><span class="tag-label">综述</span><span class="tag-label">Transformer</span>
+                  <br><br>
+                  <b>参考文献（节选）：</b><br>
+                  [1] Vaswani A, et al. "Attention Is All You Need." NeurIPS 2017.<br>
+                  [2] He K, et al. "Deep Residual Learning." CVPR 2016.
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== Page 3：文献检索 ========== -->
+      <div class="page page-pad-20" id="page-search">
+        <div class="page-title">文献检索</div>
+        <div class="aux" style="margin-bottom:14px;">全文模糊检索 + 分类 / 标签 / 格式 / 解析状态 / 时间段组合筛选</div>
+
+        <!-- 筛选栏 -->
+        <div class="batch-bar" style="flex-wrap:wrap;">
+          <input type="text" placeholder="输入关键词..." value="深度学习" style="min-width:200px;">
+          <select><option>全部分类</option></select>
+          <select><option>全部标签</option></select>
+          <select><option>全部格式</option></select>
+          <select><option>全部解析状态</option></select>
+          <select><option>全部时间段</option></select>
+          <button class="btn btn-primary">检索</button>
+          <button class="btn">重置</button>
+        </div>
+
+        <!-- 批量操作栏 -->
+        <div class="batch-bar">
+          <label><input type="checkbox" checked> 全选当前结果（3 篇）</label>
+          <div class="spacer"></div>
+          <button class="btn">批量归类</button>
+          <button class="btn">批量添加标签</button>
+          <button class="btn">批量导出</button>
+          <button class="btn btn-danger">批量删除</button>
+        </div>
+
+        <!-- DocCard 网格（对齐 cards.py） -->
+        <div class="doc-grid">
+
+          <div class="doc-card">
+            <div class="title-row">
+              <div class="card-title">深度学习综述</div>
+              <div class="parsed-label">已解析</div>
+            </div>
+            <div class="meta">作者：Zhang San, Li Si｜2024</div>
+            <div>
+              <span class="cat-label">综述类</span>
+              <span class="tag-label">高创新性</span>
+            </div>
+            <div class="actions">
+              <button class="btn">预览</button>
+              <button class="btn">查看报告</button>
+              <button class="btn">标签</button>
+              <button class="btn">删除</button>
+            </div>
+          </div>
+
+          <div class="doc-card">
+            <div class="title-row">
+              <div class="card-title">Transformer 注意力机制详解</div>
+            </div>
+            <div class="meta">作者：Wang Wu｜2025</div>
+            <div>
+              <span class="tag-label">需精读</span>
+            </div>
+            <div class="actions">
+              <button class="btn">预览</button>
+              <button class="btn">解析</button>
+              <button class="btn">标签</button>
+              <button class="btn">删除</button>
+            </div>
+          </div>
+
+          <div class="doc-card">
+            <div class="title-row">
+              <div class="card-title">联邦学习研究进展</div>
+              <div class="parsed-label">已解析</div>
+            </div>
+            <div class="meta">作者：Zhao Liu｜2024</div>
+            <div>
+              <span class="cat-label">期刊论文</span>
+              <span class="tag-label">引用素材</span>
+              <span class="tag-label">高创新性</span>
+            </div>
+            <div class="actions">
+              <button class="btn">预览</button>
+              <button class="btn">查看报告</button>
+              <button class="btn">标签</button>
+              <button class="btn">删除</button>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- 空状态示例 -->
+        <!-- <div class="empty"><div class="icon">📭</div><div class="text">没有找到匹配的文献</div><button class="btn btn-primary">前往导入文献</button></div> -->
+      </div>
+
+      <!-- ========== Page 4：笔记批注 ========== -->
+      <div class="page page-pad-20" id="page-note">
+        <div class="page-title">笔记批注</div>
+        <div class="aux" style="margin-bottom:14px;">在原文上做区域框选批注 / 荧光高亮 / 下划线 / 删除线；支持 PDF 原貌批注（PyMuPDF）。</div>
+
+        <div style="display:flex;gap:10px;margin-bottom:10px;align-items:center;">
+          <label style="color:var(--text_body);font-size:14px;">选择目标文献：</label>
+          <select style="min-width:280px;">
+            <option>深度学习综述_v2.pdf</option>
+            <option>Transformer注意力机制.txt</option>
+          </select>
+          <div style="flex:1"></div>
+          <button class="btn">立即保存</button>
+          <button class="btn btn-danger">清空当前批注</button>
+        </div>
+
+        <div class="splitter" style="grid-template-columns:1fr .85fr;">
+          <!-- 左：PDF + 工具条 -->
+          <div>
+            <div class="block-title">原文批注区</div>
+            <div class="mark-toolbar">
+              <button class="btn btn-primary">区域框选批注</button>
+              <button class="btn">荧光</button>
+              <button class="btn">下划线</button>
+              <button class="btn">删除线</button>
+              <button class="btn">清除选中标记</button>
+              <input type="color" value="#FFE066" style="width:30px;height:30px;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;">
+            </div>
+            <div class="viewer-placeholder" style="min-height:360px;">
+              <div class="big-icon">📝</div>
+              <div>PDF 原貌渲染 + 批注画布叠加层</div>
+              <div class="hint">（拖拽框选 → 生成 pdf:page:x1,y1,x2,y2 锚点）</div>
+            </div>
+          </div>
+
+          <!-- 右：批注列表 + 编辑区 -->
+          <div style="padding-left:6px;">
+            <div class="block-title">批注列表</div>
+            <div class="note-list">
+              <div class="note-item active">
+                <b>① pdf:2:90,170,506,590</b> · 区域框选批注
+                <div class="preview">"注意力机制是突破 CNN/RNN 局限性的关键架构..."</div>
+              </div>
+              <div class="note-item">
+                <b>② pdfh:3:12-38</b> · 荧光高亮
+                <div class="preview">长距离依赖建模上具有天然优势</div>
+              </div>
+              <div class="note-item">
+                <b>③ 全局笔记</b>
+                <div class="preview">本篇论文系统梳理了深度学习架构的三大范式...</div>
+              </div>
+            </div>
+            <div class="note-editor" contenteditable="true">这里是批注内容示例，业务层防抖 1 秒无新输入则自动保存到数据库。修改后立即保存可点击"立即保存"按钮。</div>
+            <div class="aux" style="margin-top:6px;font-size:12px;">💡 业务层防抖 1 秒自动保存，Ctrl+S 可立即落库</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== 管理中心子页 ========== -->
+
+      <!-- 解析规则配置（严格对齐 ui/pages/setting_pages/rules_page.py） -->
+      <div class="page page-pad-20" id="page-setting-rules">
+        <div class="page-title">解析规则配置</div>
+        <div class="aux" style="margin-bottom:14px;">选择规则模板后勾选解析维度、调节解析精度。预设内置模板不可删除，可"另存为新规则"创建自定义版本。</div>
+
+        <!-- ===== 规则模板 card ===== -->
+        <!-- rules_page.py: build_section_card("规则模板") -->
+        <div class="setting-card" style="margin-bottom:16px;">
+          <h3 style="font-size:15px;font-weight:bold;color:var(--text-title);margin-bottom:14px;">规则模板</h3>
+
+          <!-- 行1：当前规则 ComboBox + 当前默认标签 + stretch + 设为默认 -->
+          <!-- rules_page.py:42-53 -->
+          <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;">
+            <label style="color:var(--text_body);font-size:14px;">当前规则：</label>
+            <select style="min-width:260px;flex:1;">
+              <option>默认通用规则（默认）</option>
+              <option>文科通用规则</option>
+              <option>理科通用规则</option>
+              <option>工科通用规则</option>
+            </select>
+            <span class="aux" style="font-size:13px;">当前默认规则</span>
+            <div style="flex:1"></div>
+            <button class="btn btn-primary" disabled>设为默认</button>
+          </div>
+
+          <!-- QFormLayout 表单 -->
+          <!-- rules_page.py:55-85 -->
+          <div style="display:flex;flex-direction:column;gap:12px;">
+
+            <!-- 适用学科 -->
+            <div style="display:flex;gap:10px;align-items:center;">
+              <label style="color:var(--text_body);font-size:14px;width:110px;flex-shrink:0;">适用学科：</label>
+              <input type="text" value="通用" placeholder="填写适用学科，如：医学 / 计算机 / 经济学" style="flex:1;max-width:340px;opacity:.6;cursor:not-allowed;" title="预设模板的适用学科不可修改，可点击「另存为新规则」创建自定义模板">
+              <!-- 预设模板时 edit_subject.setEnabled(False)，自定义规则可编辑 -->
+            </div>
+
+            <!-- 解析维度（一行 6 个 QCheckBox） -->
+            <div style="display:flex;gap:10px;align-items:flex-start;">
+              <label style="color:var(--text_body);font-size:14px;width:110px;flex-shrink:0;padding-top:4px;">解析维度：</label>
+              <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;">
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked> 研究背景</label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked> 核心观点</label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked> 研究方法</label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked> 创新点</label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked> 研究结论</label>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" checked> 参考文献</label>
+              </div>
+            </div>
+
+            <!-- 解析精度（ComboBox 5 档 + 旁 aux label 提示） -->
+            <!-- rules_page.py:16-22 档位文案 -->
+            <div style="display:flex;gap:10px;align-items:center;">
+              <label style="color:var(--text_body);font-size:14px;width:110px;flex-shrink:0;">解析精度：</label>
+              <select style="min-width:280px;flex:1;">
+                <option value="1">1 · 最快速度（仅提取基础结构）</option>
+                <option value="2">2 · 较快（轻量化分析）</option>
+                <option value="3" selected>3 · 均衡（推荐）</option>
+                <option value="4">4 · 较精细（更全面的语义提取）</option>
+                <option value="5">5 · 最精细（耗时最长）</option>
+              </select>
+              <span class="aux" style="font-size:13px;">档位越高，解析耗时越长</span>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ===== 规则管理 card ===== -->
+        <!-- rules_page.py: build_section_card("规则管理") -->
+        <div class="setting-card">
+          <h3 style="font-size:15px;font-weight:bold;color:var(--text-title);margin-bottom:10px;">规则管理</h3>
+
+          <!-- word-wrap aux 提示文字 -->
+          <!-- rules_page.py:90-94 -->
+          <div class="aux" style="font-size:13px;margin-bottom:14px;line-height:1.7;">
+            修改当前规则后点击「保存修改」；需要保留当前内置规则时可「另存为新规则」。默认规则不可删除。
+          </div>
+
+          <!-- 按钮行 -->
+          <!-- rules_page.py:95-105 -->
+          <div style="display:flex;gap:8px;align-items:center;">
+            <button class="btn btn-primary">保存修改</button>
+            <button class="btn">另存为新规则</button>
+            <button class="btn">恢复默认维度</button>
+            <div style="flex:1"></div>
+            <button class="btn btn-danger" disabled>删除规则</button>
+            <!-- 默认规则时 btn_delete.setEnabled(False) -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 存储路径配置 -->
+      <div class="page page-pad-20" id="page-setting-storage">
+        <div class="page-title">存储路径配置</div>
+        <div class="aux" style="margin-bottom:14px;">自定义文献原件 / 解析报告 / 笔记 / 备份的存储目录。切换路径时系统会提示是否迁移历史文件。</div>
+
+        <!-- DonutChart -->
+        <div class="donut-wrap">
+          <div class="donut">
+            <div class="donut-center">
+              <div class="total">140.8 MB</div>
+              <div class="label">已用 / 共 512 GB</div>
+            </div>
+          </div>
+          <div class="legend">
+            <div class="legend-row"><span class="swatch" style="background:#4A90D9"></span>文献原件 <span class="pct">30%</span></div>
+            <div class="legend-row"><span class="swatch" style="background:#52C41A"></span>解析报告 <span class="pct">6%</span></div>
+            <div class="legend-row"><span class="swatch" style="background:#FAAD14"></span>笔记 <span class="pct">1.5%</span></div>
+            <div class="legend-row"><span class="swatch" style="background:#9254DE"></span>备份 <span class="pct">4%</span></div>
+            <div class="legend-row"><span class="swatch" style="background:#8C8C8C"></span>数据库 <span class="pct">0.3%</span></div>
+            <div class="legend-row"><span class="swatch" style="background:transparent"></span><span class="aux">磁盘剩余：468.5 GB</span></div>
+          </div>
+        </div>
+
+        <div class="setting-card" style="margin-top:16px;">
+          <div class="form-group">
+            <h3>路径配置</h3>
+            <div class="form-row"><label>📚 文献存储：</label>
+              <input type="text" value="C:\Users\me\.literature_agent\data\literature"><button class="btn">浏览</button></div>
+            <div class="form-row"><label>📋 解析报告：</label>
+              <input type="text" value="C:\Users\me\.literature_agent\data\report"><button class="btn">浏览</button></div>
+            <div class="form-row"><label>✏️ 笔记存储：</label>
+              <input type="text" value="C:\Users\me\.literature_agent\data\note"><button class="btn">浏览</button></div>
+            <div class="form-row"><label>🗂️ 备份存储：</label>
+              <input type="text" value="D:\LiteratureBackup"><button class="btn">浏览</button></div>
+            <div class="action-bar">
+              <button class="btn btn-primary">保存并迁移历史文件</button>
+              <button class="btn">打开存储目录</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI 模型配置 -->
+      <div class="page page-pad-20" id="page-setting-ai">
+        <div class="page-title">AI模型配置</div>
+        <div class="aux" style="margin-bottom:14px;">配置 AI 模型参数后点击"一键校验"测试连通性、输出结构和 PDF 原件解析通道。密钥使用 Fernet 加密存储。</div>
+        <div class="setting-card">
+          <div class="form-group">
+            <h3>模型列表</h3>
+            <div class="action-bar">
+              <button class="btn btn-primary">新增模型</button>
+              <button class="btn">删除当前</button>
+              <button class="btn">设为默认</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <h3>当前模型参数</h3>
+            <div class="form-row"><label>模型名称：</label>
+              <input type="text" value="qwen3.8-max"></div>
+            <div class="form-row"><label>接口地址：</label>
+              <input type="text" value="https://dashscope.aliyuncs.com/compatible-mode/v1"></div>
+            <div class="form-row"><label>API 密钥：</label>
+              <input type="password" value="sk-•••••••••••••••••••••••••••"><button class="eye-btn" title="显示/隐藏">👁️</button></div>
+            <div class="form-row"><label>原件解析通道：</label>
+              <select>
+                <option value="auto">🔄 自动识别（校验时实测三通道）</option>
+                <option value="file_data">📎 PDF Base64 直传（本地 PDF 内联，适合 qwen3.8）</option>
+                <option value="file_id">📁 文件 ID 托管直传（qwen-long / Kimi / Moonshot）</option>
+                <option value="none">📝 仅全文文本（不直传原件，最稳妥）</option>
+              </select>
+            </div>
+            <div class="action-bar">
+              <button class="btn btn-primary" onclick="document.getElementById('probeMask').classList.add('show');">一键校验配置</button>
+              <button class="btn">保存</button>
+              <span style="flex:1"></span>
+              <span class="aux" style="font-size:12px;">🔐 密钥使用 Fernet 本地加密存储</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 资料导出备份 -->
+      <div class="page page-pad-20" id="page-setting-backup">
+        <div class="page-title">资料导出备份</div>
+        <div class="aux" style="margin-bottom:14px;">一键全量 / 增量备份数据库 + 文献原件；从备份恢复会覆盖当前数据（需二次确认）。</div>
+
+        <div class="action-bar">
+          <button class="btn btn-primary">一键全量备份</button>
+          <button class="btn">增量备份</button>
+          <button class="btn">打开备份目录</button>
+          <div style="flex:1"></div>
+          <button class="btn">导出到外部路径...</button>
+        </div>
+
+        <table class="backup-table">
+          <thead>
+            <tr><th>备份名称</th><th>类型</th><th>大小</th><th>时间</th><th>状态</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>backup_full_20261005_0915</td><td>全量</td><td>2.3 MB</td><td>2026-10-05 09:15</td>
+              <td class="status-success">✅ 成功</td>
+              <td><button class="btn">恢复</button> <button class="btn btn-danger">删除</button></td>
+            </tr>
+            <tr>
+              <td>backup_incr_20261001_1803</td><td>增量</td><td>0.4 MB</td><td>2026-10-01 18:03</td>
+              <td class="status-success">✅ 成功</td>
+              <td><button class="btn">恢复</button> <button class="btn btn-danger">删除</button></td>
+            </tr>
+            <tr>
+              <td>backup_full_20260925_1020</td><td>全量</td><td>2.1 MB</td><td>2026-09-25 10:20</td>
+              <td class="status-warn">已失效</td>
+              <td><button class="btn">恢复</button> <button class="btn btn-danger">删除</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 标签管理 -->
+      <div class="page page-pad-20" id="page-setting-tag">
+        <div class="page-title">标签管理</div>
+        <div class="aux" style="margin-bottom:14px;">左侧为分类目录树（文献一对一归属），右侧为自定义标签（多对多绑定）。可自定义标签颜色与合并同名标签。</div>
+
+        <div class="split-2col">
+          <!-- 左：分类树 -->
+          <div class="setting-card" style="padding:16px;">
+            <h3 style="font-size:15px;font-weight:bold;color:var(--text_title);margin-bottom:12px;">📂 分类目录</h3>
+            <div class="cat-tree">
+              <div class="cat"><span class="chev">▶</span>综述类</div>
+              <div class="cat child">深度学习综述</div>
+              <div class="cat child">联邦学习综述</div>
+              <div class="cat"><span class="chev">▶</span>期刊论文</div>
+              <div class="cat"><span class="chev">▶</span>学位论文</div>
+              <div class="cat child">硕士论文</div>
+              <div class="cat child">博士论文</div>
+              <div class="cat" style="color:var(--text-aux);">➕ 新增分类</div>
+            </div>
+          </div>
+
+          <!-- 右：标签卡片 -->
+          <div class="setting-card" style="padding:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+              <h3 style="font-size:15px;font-weight:bold;color:var(--text_title);">🏷️ 自定义标签</h3>
+              <div style="display:flex;gap:8px;">
+                <button class="btn btn-primary">新增标签</button>
+                <button class="btn">套用预设模板</button>
+              </div>
+            </div>
+            <div class="tag-grid">
+              <div class="tag-card"><div class="dot" style="background:#FAAD14"></div><div class="name">高创新性</div><div class="count">已绑定 12 篇</div></div>
+              <div class="tag-card"><div class="dot" style="background:#52C41A"></div><div class="name">需精读</div><div class="count">已绑定 5 篇</div></div>
+              <div class="tag-card"><div class="dot" style="background:#4096BB"></div><div class="name">引用素材</div><div class="count">已绑定 8 篇</div></div>
+              <div class="tag-card"><div class="dot" style="background:#9254DE"></div><div class="name">待整理</div><div class="count">已绑定 3 篇</div></div>
+              <div class="tag-card"><div class="dot" style="background:#FF4D4F"></div><div class="name">关键贡献</div><div class="count">已绑定 7 篇</div></div>
+              <div class="tag-card" style="border-style:dashed;color:var(--text-aux);background:transparent;">
+                <div style="font-size:22px;">➕</div><div class="name">新增标签</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /body -->
+</div><!-- /app -->
+
+<!-- ========== Toast ========== -->
+<div class="toast" id="toast">操作成功 ✅</div>
+
+<!-- ========== Dialog：AI 校验结果 ========== -->
+<div class="mask" id="probeMask">
+  <div class="modal">
+    <h3>AI 配置校验结果</h3>
+    <div class="probe-row"><span>连通性（基础对话）</span><span class="status ok">✅ 通过</span></div>
+    <div class="probe-row"><span>输出结构（JSON 格式）</span><span class="status ok">✅ 通过</span></div>
+    <div class="probe-row"><span>PDF 原件解析</span><span class="status ok">✅ 通过 · file_data 通道</span></div>
+    <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:10px;">
+      <div class="note">自动识别结果：file_data（PDF Base64 内联，适合 qwen3.8-max）</div>
+      <div class="note">注意：模型回复中的 JSON 裸引号会自动转义，思维链会自动剥离。</div>
     </div>
-
-    <!-- 确认弹窗 -->
-    <div class="modal-mask" id="confirmModal">
-        <div class="modal-box">
-            <h4>确认操作</h4>
-            <p>确定要清空全部导入记录吗？此操作不可撤销。</p>
-            <div class="modal-footer">
-                <button class="btn modal-cancel">取消</button>
-                <button class="btn btn-primary modal-ok">确认</button>
-            </div>
-        </div>
+    <div class="actions" style="margin-top:16px;">
+      <button class="btn" onclick="document.getElementById('probeMask').classList.remove('show');">取消</button>
+      <button class="btn btn-primary" onclick="document.getElementById('probeMask').classList.remove('show');toast('配置已保存');">使用此结果并保存</button>
     </div>
+  </div>
+</div>
 
-    <!-- toast容器 -->
-    <div class="toast-wrap" id="toastWrap"></div>
+<!-- ========== Dialog：降级授权 ========== -->
+<div class="mask" id="degradeMask">
+  <div class="modal">
+    <h3>AI 解析通道失败</h3>
+    <div class="msg">
+      检测到模型不支持 PDF 原件直传通道。<br><br>
+      是否允许改用<span style="color:var(--warn);font-weight:bold;">全文文本通道</span>继续解析？
+    </div>
+    <div class="actions">
+      <button class="btn" onclick="document.getElementById('degradeMask').classList.remove('show');">不允许（回退本地规则解析）</button>
+      <button class="btn btn-primary" onclick="document.getElementById('degradeMask').classList.remove('show');toast('已改用全文文本通道');">允许，使用全文文本</button>
+    </div>
+  </div>
+</div>
 
-    <script>
-        // 主题切换
-        const toggleThemeBtn = document.getElementById('toggleTheme');
-        toggleThemeBtn.addEventListener('click', ()=>{
-            const html = document.documentElement;
-            if(html.getAttribute('data-theme') === 'dark'){
-                html.removeAttribute('data-theme');
-                showToast("已切换浅色主题");
-            }else{
-                html.setAttribute('data-theme','dark');
-                showToast("已切换深色主题");
-            }
-        })
+<script>
+/* ========== 导航切换 ========== */
+const navItems = document.querySelectorAll('.nav-item');
+const pages = document.querySelectorAll('.page');
+navItems.forEach(item => {
+  item.addEventListener('click', () => {
+    navItems.forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.fold-sub-item').forEach(n => n.classList.remove('active'));
+    item.classList.add('active');
+    const pageId = item.dataset.page;
+    pages.forEach(p => p.classList.remove('active'));
+    document.getElementById('page-' + pageId)?.classList.add('active');
+  });
+});
 
-        // 导航切换页面
-        const navItems = document.querySelectorAll('.nav-item, .nav-sub-item');
-        navItems.forEach(item=>{
-            item.addEventListener('click',()=>{
-                const pageId = item.dataset.page;
-                if(!pageId) return;
-                // nav active
-                document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
-                if(item.classList.contains('nav-item')) item.classList.add('active');
-                // page switch
-                document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-                document.getElementById(pageId).classList.add('active');
-            })
-        })
+/* ========== 折叠菜单 ========== */
+const fold = document.getElementById('settingFold');
+fold.addEventListener('click', () => fold.classList.toggle('open'));
+// 子项点击
+document.querySelectorAll('.fold-sub-item').forEach(item => {
+  item.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.fold-sub-item').forEach(n => n.classList.remove('active'));
+    item.classList.add('active');
+    const pageId = item.dataset.page;
+    pages.forEach(p => p.classList.remove('active'));
+    document.getElementById('page-' + pageId)?.classList.add('active');
+  });
+});
 
-        // 管理中心折叠菜单
-        const foldManage = document.getElementById('foldManage');
-        const foldBody = document.getElementById('foldManageBody');
-        foldManage.addEventListener('click',()=>{
-            foldBody.classList.toggle('open');
-        })
+/* ========== CollapseBlock ========== */
+document.querySelectorAll('.collapse-head').forEach(h => {
+  // 让已带 open 类的父 collapse 正确显示 body
+  const parent = h.parentElement;
+  if (parent.classList.contains('open')) {
+    h.classList.add('open');
+  }
+});
 
-        // 折叠块
-        document.querySelectorAll('.toggle-collapse').forEach(el=>{
-            el.addEventListener('click',function(){
-                const body = this.nextElementSibling;
-                body.classList.toggle('open');
-            })
-        })
+/* ========== 主题切换 ========== */
+let dark = false;
+document.getElementById('btnTheme').addEventListener('click', () => {
+  dark = !dark;
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : '');
+  toast(dark ? '已切换深色主题' : '已切换浅色主题');
+});
 
-        // 确认弹窗
-        const confirmModal = document.getElementById('confirmModal');
-        document.getElementById('openConfirmModal').addEventListener('click',()=>{
-            confirmModal.classList.add('open');
-        })
-        document.querySelector('.modal-cancel').addEventListener('click',()=>{
-            confirmModal.classList.remove('open');
-        })
-        document.querySelector('.modal-ok').addEventListener('click',()=>{
-            confirmModal.classList.remove('open');
-            showToast("已执行清空操作（原型模拟）");
-        })
+/* ========== Toast ========== */
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1600);
+}
 
-        // toast提示
-        function showToast(msg){
-            const wrap = document.getElementById('toastWrap');
-            const div = document.createElement('div');
-            div.className = 'toast-item';
-            div.innerText = msg;
-            wrap.appendChild(div);
-            setTimeout(()=>{
-                div.remove();
-            }, 2200)
-        }
-    </script>
+/* ========== 点击遮罩关闭 Dialog ========== */
+document.querySelectorAll('.mask').forEach(mask => {
+  mask.addEventListener('click', e => {
+    if (e.target === mask) mask.classList.remove('show');
+  });
+});
+</script>
 </body>
 </html>
-<!-- （注：内容由AI生成） -->

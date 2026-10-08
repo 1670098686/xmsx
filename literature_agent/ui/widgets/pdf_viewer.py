@@ -33,6 +33,63 @@ _ZOOM_STEP = 0.2
 _MIN_ZOOM = 0.6
 _MAX_ZOOM = 3.0
 
+# ========== 打开文档句柄注册表 ==========
+# Windows 上 PyMuPDF 打开 PDF 期间会持有文件句柄，未关闭时 os.remove 报
+# WinError 32（另一个程序正在使用此文件）。删除文献原件前，业务层通过
+# service_common 的删除前钩子回调 close_viewers_for_path，按路径关闭
+# 所有正在预览该文件的查看器（注册表仅在 UI 层内部使用，不跨层）。
+_OPEN_VIEWERS_BY_PATH = {}
+
+
+def _normalize_path(file_path: str) -> str:
+    """把路径规范化为注册表键（realpath + 大小写归一）。"""
+    try:
+        return os.path.normcase(os.path.realpath(file_path))
+    except (OSError, ValueError):
+        return os.path.normcase(os.path.abspath(file_path))
+
+
+def _register_viewer(viewer: "PdfViewer") -> None:
+    """按当前打开路径登记查看器。"""
+    key = getattr(viewer, "_open_path", "")
+    if key:
+        _OPEN_VIEWERS_BY_PATH.setdefault(key, set()).add(viewer)
+
+
+def _unregister_viewer(viewer: "PdfViewer") -> None:
+    """按当前打开路径注销查看器，集合清空后移除键。"""
+    key = getattr(viewer, "_open_path", "")
+    if not key:
+        return
+    viewers = _OPEN_VIEWERS_BY_PATH.get(key)
+    if viewers is not None:
+        viewers.discard(viewer)
+        if not viewers:
+            _OPEN_VIEWERS_BY_PATH.pop(key, None)
+
+
+def close_viewers_for_path(file_path: str) -> int:
+    """关闭所有正在预览指定 PDF 的查看器，释放底层文件句柄。
+
+    供删除受管文献原件前的钩子调用；未被任何查看器打开时为空操作。
+
+    Args:
+        file_path: 待删除文件绝对路径。
+    Returns:
+        实际被关闭的查看器数量。
+    """
+    if not file_path:
+        return 0
+    key = _normalize_path(file_path)
+    # 复制后遍历：close_document 会在遍历过程中修改注册表集合
+    viewers = list(_OPEN_VIEWERS_BY_PATH.get(key, ()))
+    for viewer in viewers:
+        try:
+            viewer.close_document()
+        except Exception:  # 单个查看器关闭失败不阻断删除流程
+            pass
+    return len(viewers)
+
 
 class PdfViewer(QWidget):
     """单 PDF 文档查看器：页面原貌渲染 + 翻页 + 缩放。"""
@@ -41,6 +98,7 @@ class PdfViewer(QWidget):
         """初始化查看器界面与空文档状态。"""
         super().__init__(parent)
         self._doc = None
+        self._open_path = ""
         self._page_index = 0
         self._zoom = 1.0
         self._build_ui()
@@ -113,6 +171,8 @@ class PdfViewer(QWidget):
         if self._doc is not None:
             self._doc.close()
             self._doc = None
+            _unregister_viewer(self)
+            self._open_path = ""
         try:
             self._doc = pymupdf.open(file_path)
         except Exception as exc:  # 文件损坏/加密等打开失败
@@ -123,6 +183,9 @@ class PdfViewer(QWidget):
             self._doc = None
             self._show_message("该 PDF 已加密，暂不支持在应用内预览")
             return 1, "加密 PDF"
+        # 打开成功：登记句柄，供删除文献原件前按路径统一释放（WinError 32 兜底）
+        self._open_path = _normalize_path(file_path)
+        _register_viewer(self)
         self.msg_label.hide()
         self.scroll.show()
         self._page_index = 0
@@ -131,10 +194,12 @@ class PdfViewer(QWidget):
         return 0, ""
 
     def close_document(self) -> None:
-        """关闭当前文档并释放资源。"""
+        """关闭当前文档并释放资源（同时从句柄注册表注销）。"""
         if self._doc is not None:
             self._doc.close()
             self._doc = None
+        _unregister_viewer(self)
+        self._open_path = ""
         self.page_label.setPixmap(QPixmap())
         self.lbl_page.setText("0 / 0")
 

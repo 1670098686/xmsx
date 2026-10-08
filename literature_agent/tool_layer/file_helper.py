@@ -2,9 +2,11 @@
 
 本模块不访问数据库；基准目录由 business 层从 system_config 读取后传入。
 """
+import gc
 import hashlib
 import os
 import shutil
+import time
 
 from config import constants as C
 from utils.exceptions import (
@@ -185,16 +187,26 @@ def safe_delete_file(file_path: str, base_dir: str = None) -> bool:
     if os.path.isdir(target):
         # 只允许删除文件，杜绝误删存储目录或其子目录
         raise FileInvalidError(f"拒绝删除目录：{target}")
-    try:
-        os.remove(target)
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        raise PermissionDeniedError(
-            f"文件删除失败（可能正被其他程序占用）：{exc}"
-        ) from exc
-    logger.info("文件已删除：%s", target)
-    return True
+    # Windows 上即使删除前钩子已释放预览器句柄，杀软实时扫描/索引服务等
+    # 外部进程仍可能瞬时占用文件（WinError 32），做有限次短重试；
+    # 重试耗尽仍失败才抛异常，由业务层保留数据库记录（不静默吞错）
+    last_exc = None
+    for attempt in range(1, C.FILE_DELETE_MAX_ATTEMPTS + 1):
+        try:
+            os.remove(target)
+            logger.info("文件已删除：%s", target)
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            last_exc = exc
+            if attempt >= C.FILE_DELETE_MAX_ATTEMPTS:
+                break
+            gc.collect()
+            time.sleep(C.FILE_DELETE_RETRY_INTERVAL)
+    raise PermissionDeniedError(
+        f"文件删除失败（可能正被其他程序占用）：{last_exc}"
+    ) from last_exc
 
 
 def get_disk_usage(path: str = None) -> dict:

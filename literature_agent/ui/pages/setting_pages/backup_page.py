@@ -192,12 +192,9 @@ class SettingBackupPage(QWidget):
         self.refresh()
 
     def _on_restore_finished(self, code: int, msg: str) -> None:
-        """恢复结束回调：成功时提示重启。"""
+        """恢复结束回调：成功时提示重启（msg 已含重启与找回备份提示）。"""
         self._set_busy(False)
-        if code == 0:
-            show_toast(f"{msg}，请重启应用使全部数据生效", level="success")
-        else:
-            show_toast(msg, level="error")
+        show_toast(msg, level="success" if code == 0 else "error")
         self.refresh()
 
     def _set_busy(self, busy: bool, title: str = "处理中...") -> None:

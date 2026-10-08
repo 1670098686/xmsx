@@ -288,3 +288,9 @@ AI_FILE_CHANNEL_SHORT_LABELS = {
     AI_FILE_CHANNEL_FILE_ID: "文件 ID 托管直传",
     AI_FILE_CHANNEL_NONE: "仅全文文本",
 }
+
+# ========== 受管文件删除（Windows 句柄占用兜底）==========
+# 预览器（PyMuPDF）句柄已由删除前钩子释放，但杀软实时扫描/索引服务等
+# 外部进程仍可能瞬时占用文件，首次 os.remove 遇 WinError 32 时短暂重试
+FILE_DELETE_MAX_ATTEMPTS = 3      # 总尝试次数（含首次）
+FILE_DELETE_RETRY_INTERVAL = 0.2  # 每次重试前等待（秒）

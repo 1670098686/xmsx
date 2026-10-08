@@ -9,6 +9,44 @@ from utils.logger import get_logger
 logger = get_logger()
 
 
+# ========== 删除前文件句柄释放钩子 ==========
+# 背景：UI 预览器（PyMuPDF）打开 PDF 期间持有 Windows 文件句柄，若用户
+# 预览后直接在检索页删除该文献，os.remove 会报 WinError 32。业务层不得
+# 反向导入 UI 层，故采用依赖倒置：UI 启动时注册"文件即将删除"回调，
+# 业务层在删除受管文件前统一触发，由 UI 侧关闭对应预览器释放句柄。
+_pre_file_delete_hooks = []
+
+
+def register_pre_file_delete_hook(hook) -> None:
+    """注册"受管文件即将被删除"回调（UI 层启动时调用一次即可）。
+
+    Args:
+        hook: 可调用对象，入参为待删除文件的绝对路径（str），无返回值；
+              回调内异常只记录日志，不会阻断删除主流程。
+    Note:
+        当前删除流程（检索页单删/批删、清空导入记录、覆盖导入清理旧件）
+        均在 UI 主线程同步执行，回调内可直接操作 QWidget；若后续删除
+        改为子线程执行，回调需自行做线程封送。
+    """
+    if callable(hook) and hook not in _pre_file_delete_hooks:
+        _pre_file_delete_hooks.append(hook)
+
+
+def notify_file_will_delete(abs_path: str) -> None:
+    """删除受管文件前触发句柄释放回调（business 层内部调用）。
+
+    Args:
+        abs_path: 即将删除的文件绝对路径。
+    """
+    if not abs_path:
+        return
+    for hook in list(_pre_file_delete_hooks):
+        try:
+            hook(abs_path)
+        except Exception as exc:  # 回调失败不允许阻断删除
+            logger.warning("删除前句柄释放回调执行失败 %s：%s", abs_path, exc)
+
+
 def write_operation_log(operate_type: str, operate_content: str,
                         lit_id: int = 0, status: int = C.OP_STATUS_SUCCESS) -> None:
     """统一写操作日志（失败仅记文件日志，绝不阻断主业务）。

@@ -242,6 +242,7 @@ class ExportBackupService:
 
         zip_path = None
         record_id = None
+        tmp_dir = None
         try:
             emit(5, "准备备份目录")
             backup_dir = get_base_dir("backup")
@@ -265,6 +266,9 @@ class ExportBackupService:
             # 2. 备份记录先落库（尺寸暂为 0），保证随后的数据库快照包含本记录，
             #    这样“恢复该备份”后备份列表不会丢失该备份
             name = os.path.basename(zip_path)
+            # 显式写入本地时间：列默认值 CURRENT_TIMESTAMP 是 UTC，会导致备份列表
+            # 显示时间比本地少 8 小时；与 manifest.create_time 取同一时刻保证一致
+            backup_time = now_str()
             record_id = self.backup_dao.insert({
                 "backup_name": name,
                 "backup_path": zip_path,
@@ -272,6 +276,7 @@ class ExportBackupService:
                 "backup_type": backup_type,
                 "content_scope": "all",
                 "backup_status": C.OP_STATUS_SUCCESS,
+                "backup_time": backup_time,
             })
 
             # 3. 快照数据库到临时文件
@@ -285,13 +290,19 @@ class ExportBackupService:
             manifest = {
                 "version": _BACKUP_VERSION,
                 "backup_type": backup_type,
-                "create_time": now_str(),
+                "create_time": backup_time,
                 "db_entry": _BACKUP_DB_ENTRY,
                 "file_prefix": _BACKUP_FILE_PREFIX,
                 "file_count": len(files_to_pack),
-                # files 为该时点累积清单（增量 zip 只含变化文件，
-                # 下一次增量据此比对，避免旧文件被重复判定为新增）
-                "files": [
+                # packed_files：本次 zip 实际打包的文献（恢复完整性校验依据）；
+                # cumulative_files：该时点受管目录现存全部文献的累积清单
+                # （下次增量差异比对依据）。两者必须分离：若只留"累积清单"，
+                # 裸恢复增量备份时 DB 有记录、zip 无原件会静默丢失文件。
+                "packed_files": [
+                    {"path": rel, "size": size, "sha256": digest}
+                    for rel, _abs, size, digest in files_to_pack
+                ],
+                "cumulative_files": [
                     {"path": rel, "size": size, "sha256": digest}
                     for rel, _abs, size, digest in all_files
                 ],
@@ -345,7 +356,17 @@ class ExportBackupService:
                     os.remove(zip_path)
                 except OSError:
                     pass
+            # 重写 zip 条目失败时可能残留同名 .tmp 半成品，一并清理
+            if zip_path and os.path.isfile(zip_path + ".tmp"):
+                try:
+                    os.remove(zip_path + ".tmp")
+                except OSError:
+                    pass
             return code, None, f"备份失败：{msg}"
+        finally:
+            # 无论成功失败都清理 DB 快照临时目录，避免系统临时目录残留
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def restore(self, backup_file_path: str,
                 progress_callback=None) -> tuple:
@@ -404,8 +425,33 @@ class ExportBackupService:
                     check_conn.close()
 
                 # 还原文献文件到当前受管目录
-                emit(55, "还原文献文件")
+                emit(50, "校验文献文件完整性")
                 literature_dir = file_helper.ensure_dir(get_base_dir("literature"))
+                # 覆盖 DB 前的完整性闸门：DB 快照引用且备份时点存在的文献，
+                # 原件要么在本备份 zip 内、要么已存在于目标目录。
+                # 裸恢复增量备份（无全量基线、磁盘又没有旧文件）在此被拒绝，
+                # 避免出现"库有记录、磁盘无原件"的不一致
+                missing = self._find_missing_restore_files(
+                    names, db_restore_path, manifest, literature_dir
+                )
+                if missing:
+                    preview = "、".join(missing[:3])
+                    suffix = f" 等 {len(missing)} 篇" if len(missing) > 3 else ""
+                    if manifest.get("backup_type") == C.BACKUP_TYPE_INCREMENTAL:
+                        hint = (
+                            f"该增量备份不包含 {len(missing)} 篇文献的原件"
+                            f"（{preview}{suffix}）。增量备份只保存相对上次备份"
+                            f"新增/变化的文件，请先恢复最近一次全量备份，"
+                            f"再恢复本增量备份"
+                        )
+                    else:
+                        hint = (
+                            f"备份内容不完整，缺少 {len(missing)} 篇文献原件"
+                            f"（{preview}{suffix}），无法完整恢复"
+                        )
+                    return C.CODE_FILE_INVALID, None, hint
+
+                emit(55, "还原文献文件")
                 file_entries = [
                     item for item in names
                     if item.startswith(_BACKUP_FILE_PREFIX) and not item.endswith("/")
@@ -426,12 +472,26 @@ class ExportBackupService:
             emit(88, "覆盖当前数据库")
             self._restore_database(db_restore_path)
 
+            # 快照把 backup_record 表"倒回"到备份时点：晚于该时点创建的备份
+            # （典型：先全量后增量，从全量恢复时增量记录不在快照中）zip 仍在磁盘，
+            # 记录却随覆盖消失。扫描备份目录对账，补登记缺失记录、修正失效路径
+            emit(92, "核对备份列表")
+            recon = self._reconcile_backup_records()
+            if recon["added"] or recon["relinked"] or recon["time_fixed"]:
+                logger.info(
+                    "恢复对账：补登记备份记录 %s 条，重新挂接 %s 条，时间校准 %s 条",
+                    recon["added"], recon["relinked"], recon["time_fixed"],
+                )
+
             write_operation_log(
                 C.OP_RESTORE,
                 f"从备份恢复：{os.path.basename(backup_file_path)}，重启应用后完全生效",
             )
             emit(100, "恢复完成")
-            return C.CODE_SUCCESS, None, "恢复成功，请重启应用使全部数据生效"
+            extra = ""
+            if recon["added"]:
+                extra = f"（已自动找回 {recon['added']} 个备份记录，可继续按时间顺序恢复）"
+            return C.CODE_SUCCESS, None, f"恢复成功，请重启应用使全部数据生效{extra}"
         except Exception as exc:
             code = exception_to_code(exc)
             msg = getattr(exc, "message", str(exc))
@@ -439,6 +499,10 @@ class ExportBackupService:
             write_operation_log(C.OP_RESTORE, f"恢复失败：{msg}",
                                 status=C.OP_STATUS_FAILED)
             return code, None, f"恢复失败：{msg}"
+        finally:
+            # 无论成功、失败还是完整性校验拒绝，都清理解压 DB 快照临时目录
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def get_backup_list(self) -> list:
         """获取全部备份记录（附加 file_exists 与 size_text 供 UI 展示）。"""
@@ -498,7 +562,7 @@ class ExportBackupService:
         return result
 
     def _diff_incremental(self, current_files: list) -> list:
-        """与最近一次备份的 manifest 对比，返回新增/变化文件（路径或大小不同）。"""
+        """与最近一次备份的累积清单对比，返回新增/变化文件（路径或大小不同）。"""
         latest = self.backup_dao.get_latest()
         if not latest or not os.path.isfile(latest.get("backup_path", "")):
             return current_files
@@ -507,9 +571,13 @@ class ExportBackupService:
                 manifest = json.loads(
                     zf.read(_BACKUP_MANIFEST).decode("utf-8")
                 )
+            # 新格式读 cumulative_files；旧版备份只有 files（语义同为累积清单）
+            cumulative = manifest.get("cumulative_files")
+            if cumulative is None:
+                cumulative = manifest.get("files", [])
             old_map = {
                 item["path"]: item.get("size", -1)
-                for item in manifest.get("files", [])
+                for item in cumulative
             }
         except (zipfile.BadZipFile, KeyError, ValueError) as exc:
             logger.warning("旧备份清单读取失败，按全量处理：%s", exc)
@@ -518,6 +586,58 @@ class ExportBackupService:
             item for item in current_files
             if item[0] not in old_map or item[2] != old_map[item[0]]
         ]
+
+    @staticmethod
+    def _find_missing_restore_files(zip_names: list, db_snapshot_path: str,
+                                    manifest: dict, literature_dir: str) -> list:
+        """找出恢复后仍会缺失原件的文献相对路径（覆盖 DB 前的完整性闸门）。
+
+        判定规则：DB 快照中引用、且备份时点实际存在（manifest 累积清单）
+        的每一篇文献，其原件必须「包含在本备份 zip 中」或「已存在于恢复
+        目标目录」，两者都不满足则列入缺失。备份时点本就缺失原件的孤儿
+        记录（累积清单中没有）不参与要求，避免误报。
+
+        Args:
+            zip_names: 备份 zip 内全部条目名。
+            db_snapshot_path: 已解压的数据库快照文件绝对路径。
+            manifest: 备份清单 dict（新格式含 cumulative_files，
+                      旧格式只有 files，语义相同）。
+            literature_dir: 恢复目标文献受管目录。
+        Returns:
+            缺失文件的库内相对路径列表（统一正斜杠）。
+        """
+        existed = manifest.get("cumulative_files")
+        if existed is None:  # 旧版备份回退字段
+            existed = manifest.get("files", [])
+        existed_rels = {
+            str(item.get("path", "")).replace("\\", "/")
+            for item in existed if item.get("path")
+        }
+        packed_rels = {
+            name[len(_BACKUP_FILE_PREFIX):].replace("\\", "/")
+            for name in zip_names
+            if name.startswith(_BACKUP_FILE_PREFIX) and not name.endswith("/")
+        }
+        check_conn = sqlite3.connect(db_snapshot_path)
+        try:
+            rows = check_conn.execute(
+                "SELECT file_path FROM literature_info "
+                "WHERE file_path IS NOT NULL AND file_path <> ''"
+            ).fetchall()
+        finally:
+            check_conn.close()
+        missing = []
+        for (raw_rel,) in rows:
+            rel = (raw_rel or "").replace("\\", "/")
+            # 备份时点就已缺失的孤儿记录不纳入完整性要求
+            if existed_rels and rel not in existed_rels:
+                continue
+            if rel in packed_rels:
+                continue
+            # 仅做存在性检查（只读，不写文件），同机恢复时保留磁盘现存原件
+            if not os.path.isfile(os.path.join(literature_dir, rel)):
+                missing.append(rel)
+        return missing
 
     @staticmethod
     def _snapshot_database(snapshot_path: str) -> None:
@@ -545,6 +665,79 @@ class ExportBackupService:
                 with src.open(item, "r") as rf, dst.open(item, "w") as wf:
                     shutil.copyfileobj(rf, wf)
         os.replace(tmp_zip, zip_path)
+
+    def _reconcile_backup_records(self) -> dict:
+        """恢复覆盖数据库后，对账备份目录与 backup_record 表。
+
+        恢复用的 DB 快照只含备份时点之前的备份记录；晚于该时点创建的备份
+        zip 仍在磁盘（恢复流程不清理备份目录），记录却随快照覆盖丢失，
+        导致其在备份列表消失、无法被继续恢复。本方法按文件名扫描当前备份
+        目录：缺记录的 zip 用 manifest 信息补登记（还原原始备份时间），
+        记录路径失效（换机/备份目录迁移）的重新挂接。
+
+        Returns:
+            dict: {"added": 补登记条数, "relinked": 重新挂接条数,
+                   "time_fixed": 时间校准条数}
+        """
+        result = {"added": 0, "relinked": 0, "time_fixed": 0}
+        backup_dir = get_base_dir("backup")
+        if not os.path.isdir(backup_dir):
+            return result
+        for name in sorted(os.listdir(backup_dir)):
+            if not name.lower().endswith(".zip"):
+                continue
+            abs_path = os.path.join(backup_dir, name)
+            if not os.path.isfile(abs_path):
+                continue
+            # 只认本系统备份：必须含 manifest 且可解析
+            backup_type = C.BACKUP_TYPE_FULL
+            create_time = None
+            try:
+                with zipfile.ZipFile(abs_path, "r") as zf:
+                    if _BACKUP_MANIFEST not in zf.namelist():
+                        continue
+                    manifest = json.loads(
+                        zf.read(_BACKUP_MANIFEST).decode("utf-8")
+                    )
+                backup_type = manifest.get("backup_type", C.BACKUP_TYPE_FULL)
+                create_time = manifest.get("create_time")
+            except (OSError, zipfile.BadZipFile, KeyError, ValueError):
+                logger.warning("恢复对账跳过无法解析的 zip：%s", name)
+                continue
+            try:
+                size = os.path.getsize(abs_path)
+            except OSError:
+                continue
+
+            record = self.backup_dao.get_by_name(name)
+            if record is None:
+                # 备份晚于快照时点，记录被覆盖 → 补登记
+                self.backup_dao.insert({
+                    "backup_name": name,
+                    "backup_path": abs_path,
+                    "backup_size": size,
+                    "backup_type": backup_type,
+                    "content_scope": "all",
+                    "backup_status": 1,
+                    "backup_time": create_time,
+                })
+                result["added"] += 1
+                logger.info("恢复对账补登记备份：%s（%s）", name, backup_type)
+            elif not os.path.isfile(record.get("backup_path", "")):
+                # 记录还在但路径失效，当前目录同名 zip 即实际位置；同时校准时间
+                self.backup_dao.update_location(
+                    record["id"], abs_path, size, create_time
+                )
+                result["relinked"] += 1
+                logger.info("恢复对账重新挂接备份记录 id=%s：%s",
+                            record["id"], abs_path)
+            elif create_time and record.get("backup_time") != create_time:
+                # 路径有效但时间与 manifest 不符（早期版本记录落的是 UTC）→ 校准
+                self.backup_dao.update_backup_time(record["id"], create_time)
+                result["time_fixed"] += 1
+                logger.info("恢复对账校准备份时间 id=%s：%s -> %s",
+                            record["id"], record.get("backup_time"), create_time)
+        return result
 
     @staticmethod
     def _restore_database(snapshot_path: str) -> None:

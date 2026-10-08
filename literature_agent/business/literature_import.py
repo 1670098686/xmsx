@@ -8,7 +8,8 @@ from tool_layer import file_helper, file_parser
 from utils.logger import get_logger
 
 from business.service_common import (
-    exception_to_code, get_base_dir, write_operation_log,
+    exception_to_code, get_base_dir, notify_file_will_delete,
+    write_operation_log,
 )
 
 logger = get_logger()
@@ -108,7 +109,12 @@ class LiteratureImportService:
             # 清理失败不影响导入结果，仅记录警告避免产生孤儿文件无感知
             if old_rel_path and old_rel_path != rel_path:
                 try:
-                    file_helper.safe_delete_file(old_rel_path, base_dir)
+                    old_abs = file_helper.resolve_path(
+                        old_rel_path, base_dir, "literature"
+                    )
+                    # 先释放 UI 预览器对旧原件的句柄，避免 WinError 32
+                    notify_file_will_delete(old_abs)
+                    file_helper.safe_delete_file(old_abs, base_dir)
                 except Exception as exc:
                     logger.warning("覆盖导入后旧原件清理失败：%s", exc)
             return C.CODE_SUCCESS, lit_info, "导入成功"
@@ -243,6 +249,9 @@ class LiteratureImportService:
         try:
             base_dir = get_base_dir("literature")
             abs_path = file_helper.resolve_path(rel_path, base_dir, "literature")
+            # 删除前释放 UI 预览器（PyMuPDF）对该文件的句柄，
+            # 否则 Windows 上 os.remove 会报 WinError 32
+            notify_file_will_delete(abs_path)
             file_helper.safe_delete_file(abs_path, base_dir)
             return C.CODE_SUCCESS, ""
         except Exception as exc:

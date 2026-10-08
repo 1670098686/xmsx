@@ -19,6 +19,7 @@ from config.global_config import (
     WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
 )
 from config.settings import get_setting, save_setting
+from business.service_common import register_pre_file_delete_hook
 from ui.pages.import_page import ImportPage
 from ui.pages.note_page import NotePage
 from ui.pages.parse_page import ParsePage
@@ -26,6 +27,7 @@ from ui.pages.search_page import SearchPage
 from ui.pages.setting_page import SettingPage
 from ui.theme_manager import ThemeManager
 from ui.widgets.fold_menu import FoldMenu
+from ui.widgets.pdf_viewer import close_viewers_for_path
 from ui.widgets.toast import show_toast
 from utils.logger import get_logger
 
@@ -42,7 +44,7 @@ _SETTING_MODULES = {
     "storage": "存储路径配置",
     "ai": "AI模型配置",
     "backup": "资料导出备份",
-    "tag": "标签管理",
+    "tag": "分类标签管理",
 }
 
 
@@ -126,6 +128,10 @@ class MainWindow(QMainWindow):
         self._drag_pos = None
         self._restoring = False
         self._build_ui()
+        # 删除受管文献前先关闭正在预览该文件的 PDF 查看器，释放 PyMuPDF
+        # 文件句柄，否则 Windows 删除原件会报 WinError 32（依赖倒置：
+        # business 层通过钩子回调 UI，不反向导入 UI 模块）
+        register_pre_file_delete_hook(close_viewers_for_path)
         self._register_shortcuts()
         self._restore_last_session()
 

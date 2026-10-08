@@ -39,7 +39,7 @@ class SettingTagPage(QWidget):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(10)
 
-        title = QLabel("标签管理")
+        title = QLabel("分类标签管理")
         title.setObjectName("pageTitle")
         root.addWidget(title)
 

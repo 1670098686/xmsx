@@ -1,15 +1,16 @@
-"""AI 解析分流/降级/分块、关键词持久化与 PDF 双栏文本质量测试。
+"""AI 通道工具层、Agent 原件/文本分流与授权降级、关键词持久化测试。
 
-覆盖修复点：
-- qwen-max 等不支持 file 消息的模型走"完整全文文本"通道；
-- qwen-long 等模型文件通道返回 400 协议错误时，经用户授权后降级文本通道；
-- qwen3.8 系列（max/flash/27b）PDF 走官方 Base64 内联通道（file_data），
-  无需 /files 托管与公网 URL；失败时同样须经用户授权才降级；
-- AI 不可用时回退本地规则解析；
-- 超长全文按重叠分块提炼后综合；
+Legacy 固定工作流已下线，AI 解析统一由 ReAct Agent 编排，本文件覆盖：
+- ai_client 文本/文件消息契约、通道分类、协议错误与可降级判定；
+- qwen-long（file_id）/qwen3.8 系列（file_data）/普通模型（全文文本）
+  在 Agent 端到端解析中的通道选择；
+- 原件通道失败时按错误类型精确降级：协议不支持/超限经用户授权才换文本，
+  网络/鉴权错误不重试直接转本地基线，错误原文随报告回传；
+- 提示词外置资源（resources/prompts）经 agent.prompts 加载；
 - 关键词 JSON 持久化到报告表，刷新重读不丢失；
 - PDF 抽取去中文字间空格、双栏版面还原阅读顺序；
 - schema v2→v3 老库自动迁移补 keywords 列。
+超长文本 map-reduce 的 Agent 集成测试见 test_agent.py。
 """
 import json
 import os
@@ -52,13 +53,23 @@ PAPER_TEXT = """模块化设计研究
 [2] Wang M. Software architecture review. 2023.
 """
 
+# 带真实段落锚点的五维度 AI 输出（段落号与 PAPER_TEXT 的空行切分一致），
+# Agent 溯源校验按"锚点段落与解读词汇相关"判定，故各维度直接复述对应章节
 _AI_JSON = {
-    "research_background": "随着移动互联网发展，记账类应用复杂度上升，模块化成为必然趋势。",
-    "core_view": "作者认为模块化设计能够降低耦合并提升复用效率。",
-    "research_method": "本文采用案例分析法与对比实验法，对多款记账 APP 进行拆解。",
-    "innovation_point": "文章提出一种可复用的模块划分算法与统一接口规范。",
-    "research_conclusion": "模块化设计能显著提升研发效率，建议推广至同类工具类应用。",
-    "reference_list": "[1] 张三. 软件工程模块化研究. 2022.\n[2] Wang M. Software architecture review. 2023.",
+    "research_background":
+        "随着移动互联网发展，记账类应用复杂度上升，模块化成为必然趋势。"
+        "[原文位置：3]",
+    "core_view":
+        "本文研究记账类 APP 的模块化设计方法，提出分层解耦方案。"
+        "[原文位置：2]",
+    "research_method":
+        "本文采用案例分析法与对比实验法，对多款记账 APP 进行拆解。"
+        "[原文位置：4]",
+    "innovation_point":
+        "提出一种可复用的模块划分算法与接口规范。[原文位置：5]",
+    "research_conclusion":
+        "模块化设计能显著提升研发效率，建议推广至同类工具类应用。"
+        "[原文位置：6]",
     "keywords": ["模块化", "记账APP", "分层解耦"],
 }
 
@@ -100,7 +111,7 @@ def _patch_model(monkeypatch, name="qwen-max",
 
 def test_model_capability_detection():
     """qwen-long/Kimi 支持文件直传；qwen-max 等普通模型走全文文本。"""
-    detect = LiteratureParseService._model_supports_file
+    detect = ai_client.model_supports_file
     assert detect("qwen-long", "https://dashscope.example/v1") is True
     assert detect("moonshot-v1-32k", "https://api.moonshot.test/v1") is True
     assert detect("kimi-latest", "https://api.test/v1") is True
@@ -108,18 +119,85 @@ def test_model_capability_detection():
     assert detect("ernie-4.0", "https://aistudio.example/v3") is False
 
 
-def test_file_protocol_error_recognition():
-    """仅"file 类型不被支持"的 400 错误触发降级，鉴权/网络错误不降级。"""
-    recognize = LiteratureParseService._is_file_protocol_error
-    assert recognize(AIServiceError(
+def test_file_channel_degradable_classification():
+    """原件失败的精确降级判定：协议拒绝/超限可降级，鉴权/网络错误不降级。"""
+    protocol_msgs = [
         "模型服务返回错误（400）：Invalid value: file. "
-        "Supported values are: 'text','image_url'"
-    )) is True
-    assert recognize(AIServiceError(
-        "模型服务返回错误（400）：invalid_value for content type file"
-    )) is True
-    assert recognize(AIServiceError("无法连接模型服务：timeout")) is False
-    assert recognize(AIServiceError("模型服务返回错误（401）：鉴权失败")) is False
+        "Supported values are: 'text','image_url'",
+        "模型服务返回错误（400）：invalid_value for content type file",
+        "模型服务返回错误（400）：该模型不支持文件类型消息",
+    ]
+    for message in protocol_msgs:
+        assert ai_client.is_file_channel_degradable(message) is True
+    oversize = "PDF 原件过大（约 120MB），超过内联发送上限 100MB"
+    assert ai_client.is_file_channel_degradable(oversize) is True
+    # 网络/鉴权/超时：换文本通道大概率同样失败，不降级
+    assert ai_client.is_file_channel_degradable(
+        "无法连接模型服务：timeout") is False
+    assert ai_client.is_file_channel_degradable(
+        "模型服务返回错误（401）：鉴权失败") is False
+
+
+def test_context_length_error_classification():
+    """文本通道仅"输入超长"保留短文本重试价值，其余致命错误终止 AI。"""
+    assert ai_client.is_context_length_error(
+        "模型服务返回错误（400）：maximum context length exceeded") is True
+    assert ai_client.is_context_length_error(
+        "输入文本超过模型上下文长度限制") is True
+    assert ai_client.is_context_length_error(
+        "无法连接模型服务：connection refused") is False
+    assert ai_client.is_context_length_error(
+        "模型服务返回错误（401）：鉴权失败") is False
+
+
+# ================= 长等待心跳与超时文案 =================
+
+def test_http_post_heartbeat_fires_while_waiting(monkeypatch):
+    """请求等待期间 on_waiting 按间隔被周期调用，让进度条可见"仍在思考"。"""
+    import time
+    import urllib.request
+
+    beats = []
+
+    class _SlowResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            time.sleep(0.5)
+            return b'{"ok": true}'
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda request, timeout=None: _SlowResponse())
+
+    data = ai_client._http_post(
+        "https://model.example.test/v1/chat/completions",
+        {"X-Test": "1"}, b"{}", timeout=10,
+        on_waiting=lambda elapsed: beats.append(elapsed),
+        wait_interval=0.15)
+    assert data == {"ok": True}
+    assert len(beats) >= 2, "等待 0.5 秒应至少触发两次 0.15 秒心跳"
+
+
+def test_http_post_timeout_message_points_to_server_not_network(monkeypatch):
+    """超时文案应提示服务端生成慢/换模型，而非笼统甩锅网络。"""
+    import urllib.request
+
+    def _timeout(request, timeout=None):
+        raise TimeoutError("socket timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _timeout)
+    with pytest.raises(AIServiceError) as exc_info:
+        ai_client._http_post(
+            "https://model.example.test/v1/chat/completions",
+            {}, b"{}", timeout=42)
+    message = str(exc_info.value)
+    assert "响应超时" in message
+    assert "42" in message
+    assert "请检查网络" not in message
 
 
 # ================= 文本消息通道 =================
@@ -128,7 +206,7 @@ def test_chat_with_text_plain_string_message(monkeypatch):
     """chat_with_text：content 必须是纯字符串（指令+全文），不能是 file 数组。"""
     captured = {}
 
-    def _fake_post(url, headers, body, timeout):
+    def _fake_post(url, headers, body, timeout, on_waiting=None):
         captured["url"] = url
         captured["headers"] = headers
         captured["payload"] = json.loads(body.decode("utf-8"))
@@ -154,15 +232,15 @@ def test_chat_with_text_plain_string_message(monkeypatch):
     )
 
 
-# ================= 端到端：AI 文本通道 + 关键词持久化 =================
+# ================= 端到端：Agent 文本通道 + 关键词持久化 =================
 
 def test_parse_with_ai_text_channel(mem_conn, imported_lit, monkeypatch):
-    """qwen-max：不做文件上传，完整全文作为文本发送，六维度与关键词入库。"""
+    """qwen-max：Agent 不上传原件，完整全文作为文本发送，六维度与关键词入库。"""
     _patch_model(monkeypatch)
     sent_texts = []
 
     def _fake_chat(base_url, api_key, model, full_text, prompt,
-                   system_prompt=None, max_tokens=None):
+                   system_prompt=None, max_tokens=None, on_waiting=None):
         assert model == "qwen-max"
         assert isinstance(full_text, str) and "记账类" in full_text
         assert "通读全文" in prompt
@@ -177,65 +255,73 @@ def test_parse_with_ai_text_channel(mem_conn, imported_lit, monkeypatch):
     service = LiteratureParseService()
     code, report, msg = service.parse_single(imported_lit)
     assert code == 0, msg
-    assert msg == "AI 全文解析完成"
-    assert report["parse_engine"] == "ai_text"
+    assert msg.startswith("解析完成（ReAct 智能体")
+    assert report["parse_engine"] == "agent_ai"
     assert upload_called == []  # qwen-max 不应走文件上传
     assert sent_texts and "案例分析法" in sent_texts[0]
     assert report["research_conclusion"].endswith("。")
-    assert report["keywords"] == ["模块化", "记账APP", "分层解耦"]
+    # Agent 关键词以本地 jieba 提取为准（AI keywords 仅作校验参照）
+    assert isinstance(report["keywords"], list) and report["keywords"]
+    assert "模块化" in report["keywords"]
     assert "[2] Wang M." in report["reference_list"]
 
     # 关键词以 JSON 字符串持久化；刷新页面重读时反序列化为列表
     raw = LiteratureReportDao().get_by_lit_id(imported_lit)
-    assert json.loads(raw["keywords"]) == ["模块化", "记账APP", "分层解耦"]
+    assert json.loads(raw["keywords"]) == report["keywords"]
     refreshed = LiteratureParseService().get_report(imported_lit)
-    assert refreshed["keywords"] == ["模块化", "记账APP", "分层解耦"]
+    assert refreshed["keywords"] == report["keywords"]
     # parse_engine 只存在于当次解析视图，不入库；重读不携带该字段
     assert "parse_engine" not in refreshed
 
 
 def test_parse_with_ai_file_channel(mem_conn, imported_lit, monkeypatch):
-    """qwen-long：原件直传通道，chat_with_file 收到上传后的 file_id。"""
+    """qwen-long：Agent 走原件直传，读中 FC 首轮引用上传后的 file_id。"""
     _patch_model(monkeypatch, name="qwen-long")
-    calls = {"upload": 0, "file_chat": 0, "text_chat": 0}
+    calls = {"upload": 0, "round": 0, "text_chat": 0}
+    seen_file_ids = []
 
-    def _fake_upload(base_url, api_key, file_path):
+    def _fake_upload(base_url, api_key, file_path, on_waiting=None):
         calls["upload"] += 1
         assert os.path.isfile(file_path)
         return "file-abc-123"
 
-    def _fake_file_chat(base_url, api_key, model, file_id, prompt,
-                        system_prompt=None, max_tokens=None):
-        calls["file_chat"] += 1
-        assert file_id == "file-abc-123"
-        assert "原件" in prompt
-        return _ai_answer()
+    def _fake_round(base_url, api_key, model, messages, tools=None,
+                    timeout=None, on_waiting=None, **kwargs):
+        calls["round"] += 1
+        file_part = messages[1]["content"][0]
+        assert file_part["type"] == "file"
+        seen_file_ids.append(file_part.get("file_id"))
+        assert tools  # 原件与读中工具 schema 同框（cohabit）
+        return {"content": _ai_answer(), "tool_calls": [],
+                "finish_reason": "stop"}
 
     def _fake_text_chat(*a, **k):
         calls["text_chat"] += 1
         return _ai_answer()
 
     monkeypatch.setattr(ai_client, "upload_file", _fake_upload)
-    monkeypatch.setattr(ai_client, "chat_with_file", _fake_file_chat)
+    monkeypatch.setattr(ai_client, "chat_round", _fake_round)
     monkeypatch.setattr(ai_client, "chat_with_text", _fake_text_chat)
 
     code, report, msg = LiteratureParseService().parse_single(imported_lit)
     assert code == 0, msg
-    assert msg == "AI 原件解析完成"
-    assert report["parse_engine"] == "ai_file"
-    assert calls == {"upload": 1, "file_chat": 1, "text_chat": 0}
+    assert msg == "解析完成（ReAct 智能体）"
+    assert report["parse_engine"] == "agent_ai"
+    assert calls == {"upload": 1, "round": 1, "text_chat": 0}
+    assert seen_file_ids == ["file-abc-123"]
 
 
 def test_file_channel_400_without_callback_does_not_degrade(mem_conn, imported_lit,
                                                             monkeypatch):
-    """文件通道返回 400 且无授权回调：不得静默降级，回退本地并回传错误说明。"""
+    """读中 FC 首轮返回 400 且无授权回调：不得静默降级，Agent 转本地并回传错误。"""
     _patch_model(monkeypatch, name="qwen-long")
+    protocol_error = (
+        "模型服务返回错误（400）：Invalid value: file. "
+        "Supported values are: 'text','image_url','video_url'"
+    )
 
-    def _fake_file_chat(*a, **k):
-        raise AIServiceError(
-            "模型服务返回错误（400）：Invalid value: file. "
-            "Supported values are: 'text','image_url','video_url'"
-        )
+    def _fake_round(*a, **k):
+        raise AIServiceError(protocol_error)
 
     text_calls = []
 
@@ -245,39 +331,38 @@ def test_file_channel_400_without_callback_does_not_degrade(mem_conn, imported_l
 
     monkeypatch.setattr(ai_client, "upload_file",
                         lambda *a, **k: "file-id")
-    monkeypatch.setattr(ai_client, "chat_with_file", _fake_file_chat)
+    monkeypatch.setattr(ai_client, "chat_round", _fake_round)
     monkeypatch.setattr(ai_client, "chat_with_text", _fake_text_chat)
 
     code, report, msg = LiteratureParseService().parse_single(imported_lit)
     assert code == 0, msg
-    assert report["parse_engine"] == "local"
+    assert report["parse_engine"] == "agent_local"
     assert text_calls == []  # 未获用户允许，不得改走文本通道
-    assert report.get("ai_error") and "未获得改用全文文本重试的许可" in \
-        report["ai_error"]
+    assert report.get("ai_error") == protocol_error
 
 
 def test_file_channel_400_degrades_after_user_allows(mem_conn, imported_lit,
                                                      monkeypatch):
-    """文件通道返回 400：用户授权后才用全文文本重试并成功（回调收到错误原文）。"""
+    """文件通道返回 400：用户授权后 Agent 才用全文文本重试（回调收到错误原文）。"""
     _patch_model(monkeypatch, name="qwen-long")
     protocol_error = (
         "模型服务返回错误（400）：Invalid value: file. "
         "Supported values are: 'text','image_url','video_url'"
     )
 
-    def _fake_file_chat(*a, **k):
+    def _fake_round(*a, **k):
         raise AIServiceError(protocol_error)
 
     text_calls = []
 
     def _fake_text_chat(base_url, api_key, model, full_text, prompt,
-                        system_prompt=None, max_tokens=None):
+                        system_prompt=None, max_tokens=None, on_waiting=None):
         text_calls.append(full_text)
         return _ai_answer()
 
     monkeypatch.setattr(ai_client, "upload_file",
                         lambda *a, **k: "file-id")
-    monkeypatch.setattr(ai_client, "chat_with_file", _fake_file_chat)
+    monkeypatch.setattr(ai_client, "chat_round", _fake_round)
     monkeypatch.setattr(ai_client, "chat_with_text", _fake_text_chat)
 
     asked = []
@@ -291,18 +376,18 @@ def test_file_channel_400_degrades_after_user_allows(mem_conn, imported_lit,
         imported_lit, degradation_callback=_allow
     )
     assert code == 0, msg
-    assert report["parse_engine"] == "ai_text"
-    assert msg == "AI 全文解析完成"
+    assert report["parse_engine"] == "agent_ai"
+    assert msg.startswith("解析完成（ReAct 智能体")
     assert len(text_calls) == 1 and "记账类" in text_calls[0]
     assert asked == [protocol_error]  # 授权回调必须收到 AI 原始错误信息
 
 
 def test_file_channel_400_user_denies_falls_back_to_local(mem_conn, imported_lit,
                                                           monkeypatch):
-    """文件通道返回 400：用户拒绝降级时回退本地解析且不再调用文本通道。"""
+    """文件通道返回 400：用户拒绝降级时 Agent 转本地解析且不再调文本通道。"""
     _patch_model(monkeypatch, name="qwen-long")
 
-    def _fake_file_chat(*a, **k):
+    def _fake_round(*a, **k):
         raise AIServiceError("模型服务返回错误（400）：file 不支持")
 
     text_calls = []
@@ -313,16 +398,16 @@ def test_file_channel_400_user_denies_falls_back_to_local(mem_conn, imported_lit
 
     monkeypatch.setattr(ai_client, "upload_file",
                         lambda *a, **k: "file-id")
-    monkeypatch.setattr(ai_client, "chat_with_file", _fake_file_chat)
+    monkeypatch.setattr(ai_client, "chat_round", _fake_round)
     monkeypatch.setattr(ai_client, "chat_with_text", _fake_text_chat)
 
     code, report, msg = LiteratureParseService().parse_single(
         imported_lit, degradation_callback=lambda error_message: False
     )
     assert code == 0, msg
-    assert report["parse_engine"] == "local"
+    assert report["parse_engine"] == "agent_local"
     assert text_calls == []
-    assert report.get("ai_error")
+    assert report.get("ai_error") and "400" in report["ai_error"]
 
 
 # ================= qwen3.8 系列 PDF Base64 内联通道（file_data） =================
@@ -354,17 +439,24 @@ def test_file_channel_mode_classification():
 
 def test_qwen38_pdf_uses_inline_base64_channel(mem_conn, imported_pdf_lit,
                                                monkeypatch):
-    """qwen3.8-max 解析 PDF：走 Base64 内联通道，不调用 /files 与 file_id 对话。"""
+    """qwen3.8-max 解析 PDF：Agent 走 Base64 内联通道进入读中 FC 循环，
+    不调用 /files 与 file_id。
+
+    读中循环首轮即原子产出结构化 JSON（模型直读原件，不依赖提取文本锚点），
+    维度齐全走信任旁路，只做完整性校验，不再退化到全文文本 Refine。
+    """
     _patch_model(monkeypatch, name="qwen3.8-max")
-    inline_calls, upload_calls, fileid_calls, text_calls = [], [], [], []
+    round_calls, upload_calls, fileid_calls, text_calls = [], [], [], []
 
-    def _fake_inline(base_url, api_key, model, file_path, prompt,
-                     system_prompt=None):
-        """捕获内联调用参数并返回结构化 JSON。"""
-        inline_calls.append((model, file_path, prompt, system_prompt))
-        return _ai_answer()
+    def _fake_round(base_url, api_key, model, messages, tools=None,
+                    timeout=None, on_waiting=None, **kwargs):
+        """捕获首轮消息部件并返回结构化 JSON。"""
+        file_part = messages[1]["content"][0]
+        round_calls.append((model, file_part, bool(tools)))
+        return {"content": _ai_answer(), "tool_calls": [],
+                "finish_reason": "stop"}
 
-    monkeypatch.setattr(ai_client, "chat_with_local_pdf", _fake_inline)
+    monkeypatch.setattr(ai_client, "chat_round", _fake_round)
     monkeypatch.setattr(ai_client, "upload_file",
                         lambda *a, **k: upload_calls.append(1) or "file-id")
     monkeypatch.setattr(ai_client, "chat_with_file",
@@ -374,14 +466,18 @@ def test_qwen38_pdf_uses_inline_base64_channel(mem_conn, imported_pdf_lit,
 
     code, report, msg = LiteratureParseService().parse_single(imported_pdf_lit)
     assert code == 0, msg
-    assert report["parse_engine"] == "ai_file"
-    assert msg == "AI 原件解析完成"
-    assert len(inline_calls) == 1
-    model_used, file_path, prompt, system_prompt = inline_calls[0]
+    assert len(round_calls) == 1
+    model_used, file_part, tools_on = round_calls[0]
     assert model_used == "qwen3.8-max"
-    assert file_path.endswith(".pdf")
-    assert prompt and system_prompt  # 用户/系统提示词都正常传入
+    # 契约：内联 file 部件，data URI + filename，不出现 file_id
+    assert file_part["type"] == "file"
+    assert file_part["file"]["filename"].endswith(".pdf")
+    assert file_part["file"]["file_data"].startswith(
+        "data:application/pdf;base64,")
+    assert "file_id" not in file_part
+    assert tools_on  # 原件与读中工具 schema 同框
     assert upload_calls == [] and fileid_calls == [] and text_calls == []
+    assert report["parse_engine"] == "agent_ai"
 
 
 def test_qwen38_non_pdf_uses_text_channel(mem_conn, imported_lit, monkeypatch):
@@ -395,7 +491,7 @@ def test_qwen38_non_pdf_uses_text_channel(mem_conn, imported_lit, monkeypatch):
                         lambda *a, **k: "should-not-be-called")
 
     def _fake_text(base_url, api_key, model, full_text, prompt,
-                   system_prompt=None, max_tokens=None):
+                   system_prompt=None, max_tokens=None, on_waiting=None):
         """捕获全文文本并返回结构化 JSON。"""
         text_calls.append(full_text)
         return _ai_answer()
@@ -403,7 +499,8 @@ def test_qwen38_non_pdf_uses_text_channel(mem_conn, imported_lit, monkeypatch):
     monkeypatch.setattr(ai_client, "chat_with_text", _fake_text)
     code, report, msg = LiteratureParseService().parse_single(imported_lit)
     assert code == 0, msg
-    assert report["parse_engine"] == "ai_text"
+    assert msg == "解析完成（ReAct 智能体）"
+    assert report["parse_engine"] == "agent_ai"
     assert len(text_calls) == 1 and "记账类" in text_calls[0]
     assert inline_calls == []
 
@@ -414,30 +511,31 @@ def test_unknown_model_configured_file_data_parses_pdf_inline(
     """模型名不含任何关键字，但显式配置 file_data：PDF 仍走 Base64 直传。"""
     _patch_model(monkeypatch, name="vendor-pdf-reader",
                  channel=C.AI_FILE_CHANNEL_FILE_DATA)
-    inline_calls, upload_calls, fileid_calls, text_calls = [], [], [], []
+    round_calls, upload_calls, fileid_calls = [], [], []
 
-    def _fake_inline(base_url, api_key, model, file_path, prompt,
-                     system_prompt=None):
-        """捕获内联调用并返回结构化 JSON。"""
-        inline_calls.append((model, file_path))
-        return _ai_answer()
+    def _fake_round(base_url, api_key, model, messages, tools=None,
+                    timeout=None, on_waiting=None, **kwargs):
+        """捕获内联 file 部件并返回结构化 JSON。"""
+        round_calls.append((model, messages[1]["content"][0]))
+        return {"content": _ai_answer(), "tool_calls": [],
+                "finish_reason": "stop"}
 
-    monkeypatch.setattr(ai_client, "chat_with_local_pdf", _fake_inline)
+    monkeypatch.setattr(ai_client, "chat_round", _fake_round)
     monkeypatch.setattr(ai_client, "upload_file",
                         lambda *a, **k: upload_calls.append(1) or "file-id")
     monkeypatch.setattr(ai_client, "chat_with_file",
                         lambda *a, **k: fileid_calls.append(1))
-    monkeypatch.setattr(ai_client, "chat_with_text",
-                        lambda *a, **k: text_calls.append(1))
 
     code, report, msg = LiteratureParseService().parse_single(imported_pdf_lit)
     assert code == 0, msg
-    assert report["parse_engine"] == "ai_file"
-    assert msg == "AI 原件解析完成"
-    assert len(inline_calls) == 1
-    assert inline_calls[0][0] == "vendor-pdf-reader"
-    assert inline_calls[0][1].endswith(".pdf")
-    assert upload_calls == [] and fileid_calls == [] and text_calls == []
+    assert len(round_calls) == 1
+    model_used, file_part = round_calls[0]
+    assert model_used == "vendor-pdf-reader"
+    assert file_part["file"]["filename"].endswith(".pdf")
+    assert file_part["file"]["file_data"].startswith(
+        "data:application/pdf;base64,")
+    assert upload_calls == [] and fileid_calls == []
+    assert report["parse_engine"] == "agent_ai"
 
 
 def test_configured_none_channel_uses_text_even_for_long_model_name(
@@ -453,7 +551,7 @@ def test_configured_none_channel_uses_text_even_for_long_model_name(
         raise AssertionError("仅全文文本通道不应上传原件")
 
     def _fake_text(base_url, api_key, model, full_text, prompt,
-                   system_prompt=None, max_tokens=None):
+                   system_prompt=None, max_tokens=None, on_waiting=None):
         """捕获全文文本并返回结构化 JSON。"""
         text_calls.append(full_text)
         return _ai_answer()
@@ -462,7 +560,8 @@ def test_configured_none_channel_uses_text_even_for_long_model_name(
     monkeypatch.setattr(ai_client, "chat_with_text", _fake_text)
     code, report, msg = LiteratureParseService().parse_single(imported_lit)
     assert code == 0, msg
-    assert report["parse_engine"] == "ai_text"
+    assert msg == "解析完成（ReAct 智能体）"
+    assert report["parse_engine"] == "agent_ai"
     assert len(text_calls) == 1 and "记账类" in text_calls[0]
 
 
@@ -472,7 +571,7 @@ def test_chat_with_local_pdf_request_body_contract(tmp_path, monkeypatch):
     pdf_path.write_bytes(ai_client._build_probe_pdf_bytes())
     captured = {}
 
-    def _fake_http_post(url, headers, body, timeout):
+    def _fake_http_post(url, headers, body, timeout, on_waiting=None):
         """捕获请求体并返回一份合法的 chat/completions 响应。"""
         captured["url"] = url
         captured["body"] = json.loads(body.decode("utf-8"))
@@ -511,7 +610,12 @@ def test_chat_with_local_pdf_rejects_non_pdf_and_oversize(tmp_path):
 
 def test_qwen38_inline_failure_allow_text_retry(mem_conn, imported_pdf_lit,
                                                 monkeypatch):
-    """PDF 内联失败（过大/400）：用户允许后改用全文文本通道重试成功。"""
+    """PDF 内联失败（超限可降级）：用户允许后 Agent 改用全文文本通道重试。
+
+    探测 PDF 为英文文本，中文结构化输出无法通过溯源，Refine 可能继续调用
+    文本通道，故只断言：授权回调收到错误原文、降级后至少发生一次文本调用
+    且传入的是本地提取全文，不固化调用次数。
+    """
     _patch_model(monkeypatch, name="qwen3.8-max")
     inline_error = "PDF 原件过大（约 120MB），超过内联发送上限 100MB"
 
@@ -524,22 +628,22 @@ def test_qwen38_inline_failure_allow_text_retry(mem_conn, imported_pdf_lit,
                         lambda *a, **k: "should-not-be-called")
     monkeypatch.setattr(
         ai_client, "chat_with_text",
-        lambda *a, **k: (text_calls.append(1), _ai_answer())[1],
+        lambda *a, **k: (text_calls.append(a[3]), _ai_answer())[1],
     )
     asked = []
     code, report, msg = LiteratureParseService().parse_single(
         imported_pdf_lit, degradation_callback=lambda err: asked.append(err) or True
     )
     assert code == 0, msg
-    assert report["parse_engine"] == "ai_text"
-    assert text_calls == [1]
+    assert text_calls  # 已降级到全文文本通道
+    assert isinstance(text_calls[0], str) and text_calls[0].strip()
     assert asked == [inline_error]
 
 
 def test_qwen38_inline_failure_without_callback_falls_back_local(
     mem_conn, imported_pdf_lit, monkeypatch
 ):
-    """PDF 内联失败且无授权回调：不得静默降级，回退本地并回传错误说明。"""
+    """PDF 内联失败但错误不可降级（非协议拒绝/非超限）且无授权：直接转本地。"""
     _patch_model(monkeypatch, name="qwen3.8-max")
     text_calls = []
     monkeypatch.setattr(
@@ -551,7 +655,7 @@ def test_qwen38_inline_failure_without_callback_falls_back_local(
                         lambda *a, **k: text_calls.append(1))
     code, report, msg = LiteratureParseService().parse_single(imported_pdf_lit)
     assert code == 0, msg
-    assert report["parse_engine"] == "local"
+    assert report["parse_engine"] == "agent_local"
     assert text_calls == []
     assert report.get("ai_error") and "PDF" in report["ai_error"]
 
@@ -566,8 +670,8 @@ def test_ai_unavailable_falls_back_to_local(mem_conn, imported_lit, monkeypatch)
     monkeypatch.setattr(ai_client, "chat_with_text", _boom)
     code, report, msg = LiteratureParseService().parse_single(imported_lit)
     assert code == 0, msg
-    assert report["parse_engine"] == "local"
-    assert "本地规则" in msg
+    assert report["parse_engine"] == "agent_local"
+    assert msg.startswith("解析完成（ReAct 智能体")
     # AI 失败原因必须随报告回传给界面弹窗
     assert report.get("ai_error") and "connection refused" in report["ai_error"]
     # 本地 jieba 关键词同样持久化
@@ -746,7 +850,7 @@ def test_probe_auto_unknown_model_inline_success_skips_upload(monkeypatch):
     captured = []
 
     def _fake_inline(base_url, api_key, model, file_path, prompt,
-                     system_prompt=None):
+                     system_prompt=None, on_waiting=None):
         """未知 PDF 模型走内联探测成功。"""
         captured.append(model)
         return "正文中的英文语句是：AI configuration test document. Probe token: ZXQ-4827."
@@ -774,7 +878,7 @@ def test_probe_auto_unknown_model_falls_back_to_file_id(monkeypatch):
 
     uploads = []
 
-    def _fake_upload(base_url, api_key, file_path):
+    def _fake_upload(base_url, api_key, file_path, on_waiting=None):
         """记录 /files 上传并返回托管文件 id。"""
         uploads.append(file_path)
         return "file-abc"
@@ -942,33 +1046,28 @@ def test_validate_ai_config_uses_stored_decrypted_key(mem_conn, monkeypatch):
 # ================= 提示词资源文件 =================
 
 def test_prompt_resource_files_exist_and_load():
-    """系统/用户提示词均外置为 resources/prompts 文件，加载内容与文件一致。"""
-    from business.literature_parse import _PROMPT_DIR, load_system_prompt
+    """系统/用户提示词均外置为 resources/prompts 文件，经 agent.prompts 加载。"""
+    from agent import prompts
     names = (
         "ai_system_prompt.txt", "ai_parse_user_prompt.txt",
         "ai_map_user_prompt.txt", "ai_reduce_user_prompt.txt",
         "ai_openings.json", "ai_precision_guides.json",
     )
     for name in names:
-        assert os.path.isfile(os.path.join(_PROMPT_DIR, name)), name
+        assert os.path.isfile(os.path.join(prompts._PROMPT_DIR, name)), name
 
-    with open(os.path.join(_PROMPT_DIR, "ai_system_prompt.txt"),
+    with open(os.path.join(prompts._PROMPT_DIR, "ai_system_prompt.txt"),
               encoding="utf-8") as fh:
-        assert fh.read().strip() == load_system_prompt()
-    assert "JSON" in load_system_prompt()
+        assert fh.read().strip() == prompts.load_system_prompt()
+    assert "JSON" in prompts.load_system_prompt()
 
-    dims = {key: True for key in (
-        "research_background", "core_view", "research_method",
-        "innovation_point", "research_conclusion", "reference_list",
-    )}
-    build = LiteratureParseService._build_ai_prompt
-    assert "原件" in build({"dimensions": dims}, 3, file_mode=True)
-    assert "通读全文" in build({"dimensions": dims}, 3, file_mode=False)
-    # 停用维度：字段行替换为固定空串说明
-    dims_off = dict(dims, research_background=False)
-    prompt_off = build({"dimensions": dims_off}, 1)
+    # 原件/文本通道开场白与停用维度替换均在 Agent 提示词构造器中完成
+    assert "原件" in prompts.build_ai_analyze_prompt(from_original=True)
+    assert "通读全文" in prompts.build_ai_analyze_prompt(from_original=False)
+    prompt_off = prompts.build_ai_analyze_prompt(
+        precision=1, disabled_dims="research_background")
     assert '该维度未启用，填空字符串 ""' in prompt_off
-    map_prompt = LiteratureParseService._build_ai_map_prompt({"dimensions": dims_off})
+    map_prompt = prompts.build_map_prompt("research_background")
     assert "该维度未启用，固定给 []" in map_prompt
 
 
@@ -976,7 +1075,7 @@ def test_prompt_resource_files_exist_and_load():
 
 def test_post_chat_detects_length_truncation(monkeypatch):
     """finish_reason=length（思维链耗尽预算、JSON 被截断）：抛明确截断错误。"""
-    def _fake_http_post(url, headers, body, timeout):
+    def _fake_http_post(url, headers, body, timeout, on_waiting=None):
         """模拟正文 JSON 中途被截断的网关响应。"""
         return {
             "choices": [{
@@ -997,7 +1096,7 @@ def test_post_chat_empty_content_raises(monkeypatch):
     """思考耗尽预算导致 content 为空：抛可降级的明确错误，不放行空串。"""
     monkeypatch.setattr(
         ai_client, "_http_post",
-        lambda url, headers, body, timeout:
+        lambda url, headers, body, timeout, on_waiting=None:
         {"choices": [{"message": {"content": None},
                       "finish_reason": "stop"}]},
     )
@@ -1014,7 +1113,8 @@ def test_post_chat_normal_response_returns_content(monkeypatch):
         "message": {"content": "结果文本"}, "finish_reason": "stop",
     }]}
     monkeypatch.setattr(
-        ai_client, "_http_post", lambda url, headers, body, timeout: payload,
+        ai_client, "_http_post",
+        lambda url, headers, body, timeout, on_waiting=None: payload,
     )
     assert ai_client._post_chat(
         "https://model.example.test/v1", "sk", "m", [],
@@ -1076,54 +1176,55 @@ def test_ai_max_tokens_reserves_reasoning_budget():
 
 # ================= 超长全文分块 map-reduce =================
 
-def test_split_text_chunks_overlap_and_newline(monkeypatch):
-    """分块：带重叠、尽量在换行处切，覆盖全文且无空块。"""
-    monkeypatch.setattr(C, "AI_INLINE_CHUNK_CHARS", 100)
-    monkeypatch.setattr(C, "AI_INLINE_CHUNK_OVERLAP", 20)
-    block = "字" * 80 + "\n"
-    full_text = block * 3
-    chunks = LiteratureParseService._split_text_chunks(full_text)
-    # 243 字、块宽 100、重叠 20：切为 4 个非空片段
-    assert 3 <= len(chunks) <= 5
-    assert all(chunks)  # 无空块
-    # 重叠：后块开头的内容来自前块尾部
-    assert chunks[1][:10] in chunks[0]
-    # 首块从全文开头开始，全部原文字符均被某个片段覆盖
-    assert chunks[0].startswith("字" * 40)
-    covered = "".join(chunks)
-    assert len(covered) >= len(full_text.replace("\n", ""))
+def test_split_text_chunks_keeps_global_paragraph_indices():
+    """分块以全局段落号元组返回，编号与空行切分一致，块间整段重叠。"""
+    from agent.tools import split_text_chunks
+
+    paragraph = "一二三四五六七八九十一二三四五六七八九十"  # 20 字
+    assert len(paragraph) == 20
+    full_text = "\n\n".join(f"{index}{paragraph}" for index in range(6))
+
+    chunks = split_text_chunks(full_text, size=60, overlap=20)
+
+    # 每块为 (全局段落号, 段落原文) 元组列表，且至少切成两块
+    assert len(chunks) >= 2
+    for chunk in chunks:
+        assert chunk and all(isinstance(item, tuple) and len(item) == 2
+                             for item in chunk)
+    # 首块从 0 号段落开始；全部段落 0..5 均被某块覆盖
+    assert chunks[0][0][0] == 0
+    covered = {idx for chunk in chunks for idx, _text in chunk}
+    assert covered == set(range(6))
+    # 块间按整个段落重叠：后块首段号不晚于前块末段号
+    for prev, nxt in zip(chunks, chunks[1:]):
+        assert nxt[0][0] <= prev[-1][0]
+    # 元组中的段落号与原文段落一一对应
+    for chunk in chunks:
+        for idx, text in chunk:
+            assert text == f"{idx}{paragraph}"
 
 
-def test_parse_long_text_map_reduce(mem_conn, imported_lit, monkeypatch):
-    """全文超阈值：每块提炼素材，再综合成最终报告（map+reduce 调用次数正确）。"""
-    _patch_model(monkeypatch)
-    monkeypatch.setattr(C, "AI_INLINE_FULL_CHARS", 50)
-    monkeypatch.setattr(C, "AI_INLINE_CHUNK_CHARS", 100)
-    monkeypatch.setattr(C, "AI_INLINE_CHUNK_OVERLAP", 20)
+def test_split_text_chunks_oversized_paragraph_owns_chunk():
+    """开篇单段超过块上限时独占一块（不硬切句子），编号仍为全局段落号。"""
+    from agent.tools import split_text_chunks
 
-    calls = {"map": 0, "reduce": 0}
+    long_paragraph = "超长段落" * 30  # 120 字
+    full_text = f"{long_paragraph}\n\n短段乙\n\n短段丙"
+    chunks = split_text_chunks(full_text, size=60, overlap=10)
+    flattened = [(idx, text) for chunk in chunks for idx, text in chunk]
+    assert dict(flattened) == {0: long_paragraph, 1: "短段乙", 2: "短段丙"}
+    # 超长首段独占第一个块
+    assert chunks[0] == [(0, long_paragraph)]
 
-    def _fake_chat(base_url, api_key, model, text, prompt,
-                   system_prompt=None, max_tokens=None):
-        if "其中一个片段" in prompt:
-            calls["map"] += 1
-            return json.dumps({
-                "research_background": ["片段中提到模块化趋势。"],
-                "core_view": [], "research_method": [],
-                "innovation_point": [], "research_conclusion": [],
-                "reference_list": [],
-                "keywords": ["模块化"],
-            }, ensure_ascii=False)
-        calls["reduce"] += 1
-        assert "综合" in prompt
-        return _ai_answer()
 
-    monkeypatch.setattr(ai_client, "chat_with_text", _fake_chat)
-    code, report, msg = LiteratureParseService().parse_single(imported_lit)
-    assert code == 0, msg
-    assert report["parse_engine"] == "ai_text"
-    assert calls["map"] >= 2 and calls["reduce"] == 1
-    assert report["core_view"].endswith("。")
+def test_split_text_chunks_rejects_exceeding_max_chunks():
+    """块数超过上限抛业务异常，提示换用长文本模型。"""
+    from agent.tools import split_text_chunks
+    from utils.exceptions import LiteratureAgentError
+
+    full_text = "\n\n".join(f"第{index}段内容内容内容" for index in range(10))
+    with pytest.raises(LiteratureAgentError):
+        split_text_chunks(full_text, size=30, overlap=0, max_chunks=3)
 
 
 # ================= 关键词脏数据兼容 =================
@@ -1222,20 +1323,36 @@ def test_clean_extracted_text_filters_noise():
     assert "后续他文也不应出现" not in out
 
 
+def test_clean_extracted_text_strips_editor_fragment_keeps_sentence():
+    """责编标记与正文末句挤在同一物理行时只删碎片，保留正文。"""
+    raw = (
+        "正常段落正文内容。\n"
+        "的软件设计领域相关的理论研究较缺乏，但由于其庞大的市（责编：若佳）\n"
+        "责编：若佳\n"
+    )
+    out = file_parser.clean_extracted_text(raw)
+    assert "责编" not in out
+    assert "若佳" not in out
+    assert "的软件设计领域相关的理论研究较缺乏" in out
+    assert "但由于其庞大的市" in out
+    assert "正常段落正文内容" in out
+
+
 def test_find_body_top_requires_dense_pairs():
     """孤立的页眉/标题配对行不能被当正文起点，必须有密集配对行确认。"""
     # 48 页眉、127 大标题在两侧都有词块；232 起才是连续双栏正文
+    # 物理行三元组：(top, x0, text)
     left, right = [], []
     for top in (48.0, 127.0):
-        left.append((top, "左侧页眉标题"))
-        right.append((top, "右侧页眉标题"))
+        left.append((top, 60.0, "左侧页眉标题"))
+        right.append((top, 320.0, "右侧页眉标题"))
     for index, top in enumerate(range(232, 304, 12)):
-        left.append((float(top), f"左文{index}"))
-        right.append((float(top), f"右文{index}"))
+        left.append((float(top), 60.0, f"左文{index}"))
+        right.append((float(top), 320.0, f"右文{index}"))
     body_top = file_parser._find_body_top(left, right)
     assert body_top == 232.0
     # 完全没有配对行时返回 None
-    assert file_parser._find_body_top([(10, "单栏")], []) is None
+    assert file_parser._find_body_top([(10, 60.0, "单栏")], []) is None
 
 
 def test_reconstruct_columns_keeps_title_in_preamble():

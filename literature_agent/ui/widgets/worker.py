@@ -209,7 +209,7 @@ class AIProbeWorker(QThread):
 
 
 class ExportWorker(QThread):
-    """批量导出解析报告子线程（支持另存目录与保存到资料库两种模式）。
+    """批量导出解析报告子线程（支持另存到自选目录与保存到报告存储目录两种模式）。
 
     Signals:
         progress(int, str): 进度百分比、阶段描述。
@@ -226,8 +226,8 @@ class ExportWorker(QThread):
         Args:
             lit_ids: 文献 id 列表。
             fmt: word/txt/pdf。
-            output_dir: 另存模式的导出目录（保存到资料库时忽略）。
-            to_library: True 时保存到项目资料库报告目录（时间戳历史版本）。
+            output_dir: 另存模式的导出目录（保存到报告存储目录时忽略）。
+            to_library: True 时保存到配置的解析报告存储目录（时间戳历史版本）。
             report_map: {lit_id: report_dict}，保留解析当次的关键词附加信息。
         """
         super().__init__(parent)
@@ -239,7 +239,7 @@ class ExportWorker(QThread):
         self._service = ExportBackupService()
 
     def run(self):
-        """子线程执行批量导出/资料库保存。"""
+        """子线程执行批量导出/报告存储目录保存。"""
         if self.to_library:
             result = self._service.save_batch_to_library(
                 self.lit_ids, self.fmt, self.report_map,

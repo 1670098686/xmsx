@@ -1,6 +1,9 @@
 """日志工具：统一记录操作日志与异常堆栈到本地文件。
 
 日志文件位于用户数据目录 logs/app.log，按 2MB 轮转、保留 5 份。
+控制台默认只显示 INFO 及以上的简洁日志；以 ``python main.py -v``
+（或设置环境变量 LIT_AGENT_VERBOSE=1）启动时，控制台显示 DEBUG 全量
+详细日志（含时间、代码位置），便于排查解析失败等问题根由。
 """
 import logging
 import os
@@ -8,10 +11,22 @@ from logging.handlers import RotatingFileHandler
 
 _DEFAULT_LOG_DIR = os.path.join(os.path.expanduser("~"), ".literature_agent", "logs")
 _LOGGER_NAME = "literature_agent"
+# 控制台详细模式开关：1/true/debug/on 视为开启（不区分大小写）
+_VERBOSE_ENV = "LIT_AGENT_VERBOSE"
 _max_bytes = 2 * 1024 * 1024
 _backup_count = 5
 
 _logger_cache = None
+
+
+def console_verbose_enabled() -> bool:
+    """读取控制台详细日志开关（环境变量 LIT_AGENT_VERBOSE）。
+
+    Returns:
+        True 表示控制台输出 DEBUG 级详细日志。
+    """
+    return str(os.environ.get(_VERBOSE_ENV, "")).strip().lower() in (
+        "1", "true", "debug", "on", "yes")
 
 
 def get_logger(log_dir: str = None) -> logging.Logger:
@@ -46,10 +61,16 @@ def get_logger(log_dir: str = None) -> logging.Logger:
         logger.addHandler(file_handler)
 
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(
-            logging.Formatter("%(levelname)-7s | %(message)s")
-        )
+        if console_verbose_enabled():
+            # 详细模式：与文件一致的全量格式，排查时可直接定位代码位置
+            console_handler.setLevel(logging.DEBUG)
+            console_handler.setFormatter(file_fmt)
+        else:
+            # 默认模式：去掉 INFO/DEBUG 技术术语，改为用户友好的中文消息
+            console_handler.setLevel(logging.INFO)
+            console_handler.setFormatter(
+                logging.Formatter("%(message)s")
+            )
         logger.addHandler(console_handler)
 
     _logger_cache = logger

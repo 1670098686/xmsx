@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 from utils.exceptions import FileInvalidError, LiteratureFileNotFoundError, ParseError
 from utils.logger import get_logger
@@ -42,6 +43,30 @@ _CONTINUED_FROM_RE = re.compile(r"[（(]\s*上接第\s*\d+\s*页\s*[）)]")
 _BODY_PAIR_WINDOW_PT = 120.0
 _BODY_PAIR_MIN_COUNT = 4
 _BODY_PAIR_MAX_GAP_PT = 30.0
+# 段落重建：相邻物理行 top 差超过中位行距的倍数即视为段前空白
+_PARA_GAP_RATIO = 1.55
+# 段落重建：段前空白还须至少比中位行距多出的 pt 数（抗行距抖动）
+_PARA_GAP_EXTRA_PT = 4.0
+# 段落重建：行首 x0 相对栏内正文基准缩进超过"中位行距*该系数"视为首行缩进
+_PARA_INDENT_RATIO = 0.8
+# 标题样式行的最大长度（超过则按普通正文行处理，避免误断）
+_HEADING_LINE_MAX_LEN = 30
+# 编辑/责编碎片（页脚，如"（责编：若佳）"）；双栏排版中常与正文末句
+# 挤在同一物理行，故按碎片删除而非整行丢弃，末句正文得以保留
+_EDITOR_FRAGMENT_RE = re.compile(r"\s*[（(]?\s*责\s*编\s*[:：][^）)]*[）)]?")
+# 标题样式行：编号前缀（一、 / （二） / 1. / 2.3、 / 第X章）开头
+_HEADING_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"[一二三四五六七八九十]+\s*[、.．]"
+    r"|[（(]\s*[一二三四五六七八九十0-9]+\s*[）)]"
+    r"|\d+(?:\.\d+)*\s*[、.．]"
+    r"|第\s*[一二三四五六七八九十0-9]+\s*[章节]"
+    r")"
+)
+# 页眉/页脚去重时排除的参考文献条目行
+_REF_ITEM_PREFIX_RE = re.compile(r"^\s*\[\s*\d+\s*\]")
+# 参与页眉/页脚去重的行长度上限
+_RUNNING_HEADER_MAX_LEN = 22
 # 单词字符（含中文）
 _ALNUM_RE = re.compile(rf"[{_CJK_CHAR}A-Za-z0-9]")
 # 判定符号乱码行的最小长度
@@ -81,25 +106,34 @@ def strip_cjk_spaces(text: str) -> str:
 def _is_symbol_garbage_line(line: str) -> bool:
     """判断是否为表格图片/符号字体产生的乱码行。
 
-    两类特征：符号数超过文字数两倍；或整行无中文、无空格且较长
+    三类特征：符号数超过文字数两倍；或整行无中文、无空格且较长
     （期刊内嵌表格图片的字形层通常是连续乱码字母串，正常英文
-    参考文献行都含空格分词）。
+    参考文献行都含空格分词）；或无中文无空格的极短碎片行
+    （表格字形层常碎成 "PQ"、"nfo"、")*+"、"!234/0" 这类
+    2-6 字片段，正常正文不会以符号开头且无空格独立成行）。
     """
     stripped = line.strip()
-    if len(stripped) < _GARBAGE_MIN_LEN:
-        return False
     alnum_count = len(_ALNUM_RE.findall(stripped))
     symbol_count = len(stripped) - alnum_count
-    if symbol_count > alnum_count * 2:
+    if stripped and symbol_count > alnum_count * 2:
         return True
     has_cjk = any(_is_cjk_char(char) for char in stripped)
-    if not has_cjk and " " not in stripped and alnum_count >= _GARBAGE_MIN_LEN:
-        return True
+    if not has_cjk and " " not in stripped:
+        if alnum_count >= _GARBAGE_MIN_LEN:
+            return True
+        # 极短字母/数字/符号碎片（2-5 字）或以符号开头的碎片
+        if 2 <= len(stripped) < _GARBAGE_MIN_LEN:
+            return True
+        if stripped and not stripped[0].isalnum():
+            return True
     return False
 
 
 def clean_extracted_text(text: str) -> str:
-    """清理 PDF 抽取噪声：未映射字形 (cid:n)、独立页码与符号乱码行。
+    """清理 PDF 抽取噪声：未映射字形 (cid:n)、独立页码、责编/页眉行与乱码行。
+
+    保留物理空行：段落重建产生的空行是溯源锚点分段的唯一依据，不得压缩；
+    连续多个空行统一折叠为一个，页间分隔保持一个空行。
 
     Args:
         text: 已完成中文空格整理的抽取文本。
@@ -113,16 +147,39 @@ def clean_extracted_text(text: str) -> str:
     if continued:
         text = text[:continued.start()]
     text = _UNMAPPED_GLYPH_RE.sub("", text)
+    raw_lines = text.splitlines()
+    # 页眉/页脚（期刊名、栏目名）在每页重复出现：短行出现 >=2 次即剔除；
+    # 参考文献条目等可能合法重复的行不参与判定
+    header_counts = {}
+    for line in raw_lines:
+        stripped = line.strip()
+        if (0 < len(stripped) <= _RUNNING_HEADER_MAX_LEN
+                and not _REF_ITEM_PREFIX_RE.match(stripped)):
+            header_counts[stripped] = header_counts.get(stripped, 0) + 1
+    running_headers = {line for line, count in header_counts.items() if count >= 2}
+
     kept = []
-    for line in text.splitlines():
+    for line in raw_lines:
+        stripped = line.strip()
+        if not stripped:
+            # 保留空行但折叠连续空行（段落/页边界）
+            if kept and kept[-1] != "":
+                kept.append("")
+            continue
+        if _PAGE_NUMBER_RE.match(stripped):
+            continue
+        # 责编碎片常粘连在正文末句之后：只删碎片，保留同行的正文部分
+        line = _EDITOR_FRAGMENT_RE.sub("", line)
         stripped = line.strip()
         if not stripped:
             continue
-        if _PAGE_NUMBER_RE.match(stripped):
+        if stripped in running_headers:
             continue
         if _is_symbol_garbage_line(stripped):
             continue
         kept.append(line.rstrip())
+    while kept and kept[-1] == "":
+        kept.pop()
     return "\n".join(kept)
 
 
@@ -218,20 +275,85 @@ def group_words_into_lines(words: list) -> list:
     return [sorted(line, key=lambda w: w.get("x0", 0)) for line in lines]
 
 
-def words_to_lines(words: list) -> str:
-    """把词块按"先上后下、同行从左到右"拼成保留换行的文本。
+def reconstruct_paragraphs(typed_lines: list) -> str:
+    """把物理行序列按排版信号重建为"空行分隔段落"的文本。
 
-    相邻词块均为中文时不补空格；间距明显时（英文词之间）补一个空格。
+    PDF 文本层只保留物理行，不保留段落结构；而 Agent 溯源校验按空行
+    切分全局段落，若整篇被压成一段，任何锚点在数学上都无法通过覆盖
+    校验。这里用三类排版信号恢复段落边界：
+    - 段前空白：本行与上一行的纵向间距显著大于中位行距；
+    - 首行缩进：本行首词 x0 明显大于栏内正文行左边距（中文正文段首
+      缩进两字，约 21pt）；
+    - 标题样式行：编号前缀的短独占行（如"（二）模块化设计"）。
+
+    Args:
+        typed_lines: [(top, x0, text), ...]，按阅读顺序排好的物理行。
+    Returns:
+        段内以单换行连接、段间以空行（\\n\\n）分隔的文本。
+    """
+    rows = [(float(top), float(x0), str(text).strip())
+            for top, x0, text in typed_lines if str(text).strip()]
+    if not rows:
+        return ""
+    gaps = [rows[i][0] - rows[i - 1][0]
+            for i in range(1, len(rows)) if rows[i][0] > rows[i - 1][0]]
+    median_gap = sorted(gaps)[len(gaps) // 2] if gaps else 0.0
+    x0_values = sorted(row[1] for row in rows)
+    x0_base = x0_values[len(x0_values) // 2] if x0_values else 0.0
+    gap_threshold = max(
+        median_gap * _PARA_GAP_RATIO, median_gap + _PARA_GAP_EXTRA_PT)
+    indent_threshold = max(median_gap * _PARA_INDENT_RATIO, 6.0)
+
+    def _starts_paragraph(index: int) -> bool:
+        top, x0, text = rows[index]
+        if index == 0:
+            return False
+        prev_top = rows[index - 1][0]
+        if top - prev_top >= gap_threshold:
+            return True
+        if x0 - x0_base >= indent_threshold:
+            return True
+        if (len(text) <= _HEADING_LINE_MAX_LEN
+                and _HEADING_LINE_RE.match(text)
+                and not re.search(r"[。！？!?]", text)):
+            return True
+        return False
+
+    blocks = []
+    current = [rows[0][2]]
+    for index in range(1, len(rows)):
+        if _starts_paragraph(index):
+            blocks.append("\n".join(current))
+            current = [rows[index][2]]
+        else:
+            current.append(rows[index][2])
+    blocks.append("\n".join(current))
+    return "\n\n".join(blocks)
+
+
+def words_to_lines(words: list) -> str:
+    """把词块按"先上后下、同行从左到右"拼成保留段落结构的文本。
+
+    物理行之间以单换行连接；检测到段前空白/首行缩进/标题行时插入空行，
+    输出的空行分段与人类视觉段落一致，供下游章节识别与溯源锚点使用。
 
     Args:
         words: pdfplumber 词块列表。
     Returns:
-        拼合后的多行文本。
+        拼合后的多段文本。
     """
     if not words:
         return ""
-    lines = [_join_line_words(line) for line in group_words_into_lines(words)]
-    return "\n".join(line for line in lines if line)
+    typed_lines = []
+    for line in group_words_into_lines(words):
+        text = _join_line_words(line)
+        if text:
+            typed_lines.append((
+                sum(w.get("top", 0.0) for w in line) / len(line),
+                min(w.get("x0", 0.0) for w in line),
+                text,
+            ))
+    return reconstruct_paragraphs(typed_lines)
 
 
 def _join_line_words(line_words: list) -> str:
@@ -284,8 +406,13 @@ def _partition_column_lines(words: list, divider: float) -> tuple:
             right_words.append(word)
 
     def _to_lines(group):
-        return [(_line_top(line), _join_line_words(line))
-                for line in group_words_into_lines(group)]
+        typed = []
+        for line in group_words_into_lines(group):
+            text = _join_line_words(line)
+            if text:
+                typed.append((_line_top(line),
+                              min(w.get("x0", 0.0) for w in line), text))
+        return typed
 
     return (
         _to_lines(left_words),
@@ -306,29 +433,30 @@ def _merge_column_lines(left_lines: list, right_lines: list,
     span_lines = sorted(span_lines, key=lambda item: item[0])
     parts = []
     li = ri = 0
-    for ftop, ftext in span_lines:
+    for ftop, _fx0, ftext in span_lines:
         boundary = ftop + _LINE_TOP_TOLERANCE_PT
         l_buf = []
         while li < len(left_lines) and left_lines[li][0] <= boundary:
-            l_buf.append(left_lines[li][1])
+            l_buf.append(left_lines[li])
             li += 1
         r_buf = []
         while ri < len(right_lines) and right_lines[ri][0] <= boundary:
-            r_buf.append(right_lines[ri][1])
+            r_buf.append(right_lines[ri])
             ri += 1
+        # 每栏内部按排版信号独立重建段落，再按左栏→右栏还原阅读顺序
         if l_buf:
-            parts.append("\n".join(line for line in l_buf if line))
+            parts.append(reconstruct_paragraphs(l_buf))
         if r_buf:
-            parts.append("\n".join(line for line in r_buf if line))
+            parts.append(reconstruct_paragraphs(r_buf))
         if ftext:
             parts.append(ftext)
-    rest_left = [text for _top, text in left_lines[li:] if text]
-    rest_right = [text for _top, text in right_lines[ri:] if text]
+    rest_left = [row for row in left_lines[li:] if row[2]]
+    rest_right = [row for row in right_lines[ri:] if row[2]]
     if rest_left:
-        parts.append("\n".join(rest_left))
+        parts.append(reconstruct_paragraphs(rest_left))
     if rest_right:
-        parts.append("\n".join(rest_right))
-    return "\n".join(part for part in parts if part)
+        parts.append(reconstruct_paragraphs(rest_right))
+    return "\n\n".join(part for part in parts if part)
 
 
 def _find_body_top(left_lines: list, right_lines: list):
@@ -342,9 +470,9 @@ def _find_body_top(left_lines: list, right_lines: list):
     Returns:
         正文区起始 top；无法判定（如单栏内容）时返回 None。
     """
-    r_tops = sorted(top for top, _text in right_lines)
+    r_tops = sorted(top for top, _x0, _text in right_lines)
     paired = []
-    for top, _text in sorted(left_lines, key=lambda item: item[0]):
+    for top, _x0, _text in sorted(left_lines, key=lambda item: item[0]):
         if any(abs(top - other) <= _LINE_TOP_TOLERANCE_PT for other in r_tops):
             paired.append(top)
     for index, top in enumerate(paired):
@@ -378,7 +506,8 @@ def _reconstruct_columns(words: list, divider: float) -> str:
     body_text = _merge_column_lines(left2, right2, span2)
     if body_text:
         parts.append(body_text)
-    return "\n".join(parts)
+    # 页眉标题区与正文区是天然的段落边界，用空行分隔
+    return "\n\n".join(parts)
 
 
 def _extract_page_band_text(words: list, page_width: float,
@@ -447,7 +576,7 @@ def _extract_pdf_page_text(page) -> str:
         _extract_page_band_text(words, width, band_range)
         for band_range in band_ranges
     ]
-    merged = "\n".join(text for text in band_texts if text)
+    merged = "\n\n".join(text for text in band_texts if text)
     return merged or (page.extract_text() or "")
 
 
@@ -526,7 +655,7 @@ def extract_pdf_text(file_path: str) -> tuple:
             strip_cjk_spaces("\n\n".join(pages_text))
         ).strip()
         if not text:
-            raise FileInvalidError("PDF 无文本层（可能是扫描件），暂不支持 OCR")
+            raise FileInvalidError("PDF 无文本层（可能是纯扫描件），无法提取文字")
         return text, meta
     except FileInvalidError:
         raise
@@ -555,7 +684,10 @@ def extract_txt_text(file_path: str) -> tuple:
         raise FileInvalidError("文本文件内容为空")
     for encoding in _TXT_ENCODINGS:
         try:
-            text = raw.decode(encoding).strip()
+            # 统一换行符：Windows 记事本等保存的 CRLF/CR 文献若原样保留，
+            # Agent 溯源校验按空行分段时会把整篇误判为一段，导致锚点全部越界
+            text = raw.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+            text = text.strip()
             if text:
                 meta = {
                     "title": os.path.splitext(os.path.basename(file_path))[0],
@@ -610,6 +742,152 @@ def extract_docx_text(file_path: str) -> tuple:
         meta["title"] = (getattr(core, "title", "") or "").strip()
         meta["author"] = (getattr(core, "author", "") or "").strip()
     return text, meta
+
+
+# ================= 表格结构化提取（PDF / DOCX → Markdown） =================
+# 常规正文提取（extract_words/extract_text）会把表格单元格文字按物理位置
+# 拆散或串列，丢失行列关系。这里单独用各库的表格识别能力把表格还原为
+# Markdown 行列文本，供 AI 在文本通道综合时读到准确的表格数据。
+
+def _table_rows_to_markdown(rows: list) -> str:
+    """把二维单元格数组转换为 GitHub 风格 Markdown 表格。
+
+    Args:
+        rows: 表格行的二维列表（每个元素为一行的单元格字符串）。
+    Returns:
+        Markdown 表格文本；无任何有效单元格时返回空串。
+    """
+    cleaned: list[list[str]] = []
+    for row in rows or []:
+        cells = [
+            str(cell or "").replace("\n", " ").replace("|", "\\|").strip()
+            for cell in row
+        ]
+        if any(cells):  # 整行全空的单元格行丢弃
+            cleaned.append(cells)
+    if not cleaned:
+        return ""
+    col_count = max(len(row) for row in cleaned)
+    normalized = [row + [""] * (col_count - len(row)) for row in cleaned]
+    lines = [
+        "| " + " | ".join(normalized[0]) + " |",
+        "| " + " | ".join(["---"] * col_count) + " |",
+    ]
+    for row in normalized[1:]:
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
+def _extract_pdf_tables(file_path: str, page_index: int,
+                        max_tables: int) -> tuple:
+    """用 pdfplumber 识别并提取 PDF 中的表格为 Markdown。
+
+    Args:
+        file_path: PDF 文件绝对路径。
+        page_index: 指定页码索引（从 0 开始）；负数表示提取全部页。
+        max_tables: 返回表格数量上限。
+    Returns:
+        (tables, table_pages)：tables 为
+        [{"page":int,"index":int,"markdown":str},...]，
+        table_pages 为含表格的页码索引列表。
+    """
+    import pdfplumber
+
+    tables: list[dict] = []
+    table_pages: list[int] = []
+    with pdfplumber.open(file_path) as pdf:
+        total = len(pdf.pages)
+        if int(page_index) >= 0:
+            indices = [int(page_index)] if 0 <= int(page_index) < total else []
+        else:
+            indices = range(total)
+        for pidx in indices:
+            page = pdf.pages[pidx]
+            try:
+                found = page.find_tables()
+            except Exception:  # 单页表格识别失败不影响其他页
+                found = []
+            page_has_table = False
+            for table_index, table in enumerate(found):
+                try:
+                    rows = table.extract()
+                except Exception:
+                    continue
+                markdown = _table_rows_to_markdown(rows)
+                if not markdown:
+                    continue
+                tables.append({
+                    "page": int(pidx), "index": int(table_index),
+                    "markdown": markdown,
+                })
+                page_has_table = True
+                if len(tables) >= max_tables:
+                    break
+            if page_has_table:
+                table_pages.append(int(pidx))
+            if len(tables) >= max_tables:
+                break
+    return tables, table_pages
+
+
+def _extract_docx_tables(file_path: str, max_tables: int) -> list:
+    """用 python-docx 提取 Word 文档中的全部表格为 Markdown。
+
+    Args:
+        file_path: DOCX 文件绝对路径。
+        max_tables: 返回表格数量上限。
+    Returns:
+        [{"page":"docx","index":int,"markdown":str},...]
+    """
+    import docx
+
+    document = docx.Document(file_path)
+    tables: list[dict] = []
+    for table_index, table in enumerate(document.tables):
+        if len(tables) >= max_tables:
+            break
+        rows = [
+            [cell.text for cell in row.cells]
+            for row in getattr(table, "rows", [])
+        ]
+        markdown = _table_rows_to_markdown(rows)
+        if markdown:
+            tables.append({
+                "page": "docx", "index": int(table_index),
+                "markdown": markdown,
+            })
+    return tables
+
+
+def extract_tables_markdown(file_path: str, page_index: int = -1,
+                            max_tables: int = 20) -> dict:
+    """按文件类型提取文献中的表格，统一转成 Markdown 文本。
+
+    Args:
+        file_path: 文献原件绝对路径（PDF/DOCX/TXT/DOC）。
+        page_index: PDF 指定页码索引（从 0 开始）；负数表示全部页；
+            对 DOCX/TXT 无效。
+        max_tables: 返回表格数量上限。
+    Returns:
+        {"tables":[{"page":int|"docx","index":int,"markdown":str}],
+         "table_pages":[int]}；TXT/旧版 DOC 无表格返回空结构。
+    Raises:
+        FileInvalidError: 文件不存在/不可读。
+        ParseError: PDF/DOCX 表格提取依赖缺失或解析失败。
+    """
+    _check_readable(file_path)
+    limit = max(1, int(max_tables))
+    suffix = os.path.splitext(file_path)[1].lower()
+    if suffix == ".pdf":
+        tables, table_pages = _extract_pdf_tables(
+            file_path, int(page_index), limit)
+        return {"tables": tables, "table_pages": table_pages}
+    if suffix == ".docx":
+        return {"tables": _extract_docx_tables(file_path, limit),
+                "table_pages": []}
+    # TXT 无表格结构；旧版 .doc 需先转 .docx（文本提取链路另有转换），
+    # 表格直抽不支持，返回空结构而非报错
+    return {"tables": [], "table_pages": []}
 
 
 def _ps_literal(value: str) -> str:
@@ -962,16 +1240,19 @@ def auto_extract(file_path: str) -> tuple:
     from config import constants as C
 
     suffix = os.path.splitext(file_path)[1].lower()
-    if suffix == ".pdf":
-        text, meta = extract_pdf_text(file_path)
-        return text, meta, C.LIT_TYPE_PDF
-    if suffix == ".txt":
-        text, meta = extract_txt_text(file_path)
-        return text, meta, C.LIT_TYPE_TXT
-    if suffix == ".docx":
-        text, meta = extract_docx_text(file_path)
-        return text, meta, C.LIT_TYPE_DOCX
-    if suffix == ".doc":
-        text, meta = extract_doc_text(file_path)
-        return text, meta, C.LIT_TYPE_DOC
-    raise FileInvalidError(f"不支持的文件格式：{suffix}（仅支持 PDF/TXT/DOCX/DOC）")
+    extractors = {
+        ".pdf": (extract_pdf_text, C.LIT_TYPE_PDF),
+        ".txt": (extract_txt_text, C.LIT_TYPE_TXT),
+        ".docx": (extract_docx_text, C.LIT_TYPE_DOCX),
+        ".doc": (extract_doc_text, C.LIT_TYPE_DOC),
+    }
+    if suffix not in extractors:
+        raise FileInvalidError(
+            f"不支持的文件格式：{suffix}（仅支持 PDF/TXT/DOCX/DOC）")
+    extractor, file_type = extractors[suffix]
+    started = time.monotonic()
+    text, meta = extractor(file_path)
+    logger.debug("全文提取完成：%s → %s，%s 字，耗时 %.2f 秒",
+                 os.path.basename(file_path), file_type,
+                 len(text or ""), time.monotonic() - started)
+    return text, meta, file_type

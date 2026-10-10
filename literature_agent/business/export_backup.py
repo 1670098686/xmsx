@@ -73,11 +73,12 @@ class ExportBackupService:
 
     def save_report_to_library(self, lit_id: int, fmt: str,
                                report_data: dict = None) -> tuple:
-        """解析完成后把报告默认保存到文献资料库（与上传的文献原件同一目录）。
+        """解析完成后把报告保存到解析报告存储目录（system_config 配置的
+        report_path，与文献原件目录分离）。
 
         文件名含时间戳，同一篇文献多次保存会保留全部历史版本文件；
         同一秒内重复保存时自动追加序号，绝不覆盖旧文件。
-        用户主动"另存为"导出的报告才进入解析报告存储目录，与本方法无关。
+        用户主动"另存为"可导出到任意自选目录，与本方法无关。
 
         Args:
             lit_id: 文献 id。
@@ -99,8 +100,8 @@ class ExportBackupService:
 
             title = report_data.get("literature_title") or f"文献{lit_id}"
             safe_title = self._safe_filename(str(title))
-            # 默认保存位置：文献资料库目录（文献上传所在目录），非解析报告目录
-            report_dir = file_helper.ensure_dir(get_base_dir("literature"))
+            # 保存位置：配置的解析报告存储目录（report_path），与文献原件目录分离
+            report_dir = file_helper.ensure_dir(get_base_dir("report"))
             timestamp = now_str("%Y%m%d_%H%M%S")
             base_name = f"解析报告_{safe_title}_{lit_id}_{timestamp}"
             output_path = self._unique_library_path(report_dir, base_name, suffix)
@@ -108,16 +109,16 @@ class ExportBackupService:
             export_generator.export_report(report_data, output_path, fmt)
             write_operation_log(
                 C.OP_EXPORT,
-                f"报告已保存到资料库：{title}（{fmt}）", lit_id,
+                f"解析报告已保存到报告存储目录：{title}（{fmt}）", lit_id,
             )
-            return C.CODE_SUCCESS, output_path, "已保存到资料库"
+            return C.CODE_SUCCESS, output_path, "已保存到解析报告存储目录"
         except Exception as exc:
             code = exception_to_code(exc)
             msg = getattr(exc, "message", str(exc))
-            logger.error("报告保存到资料库失败 lit_id=%s：%s", lit_id, msg,
+            logger.error("解析报告保存失败 lit_id=%s：%s", lit_id, msg,
                          exc_info=True)
             write_operation_log(
-                C.OP_EXPORT, f"报告保存到资料库失败[id={lit_id}]：{msg}",
+                C.OP_EXPORT, f"解析报告保存失败[id={lit_id}]：{msg}",
                 lit_id, C.OP_STATUS_FAILED,
             )
             return code, None, msg
@@ -125,7 +126,7 @@ class ExportBackupService:
     def save_batch_to_library(self, lit_ids: list, fmt: str,
                               report_map: dict = None,
                               progress_callback=None) -> dict:
-        """批量把解析报告保存到文献资料库目录（与文献原件同目录）。
+        """批量把解析报告保存到配置的解析报告存储目录（report_path）。
 
         Args:
             lit_ids: 文献 id 列表。
@@ -149,7 +150,7 @@ class ExportBackupService:
             if progress_callback:
                 percent = int((index + 1) / total * 100)
                 progress_callback(
-                    percent, f"保存报告到资料库 {index + 1}/{total}"
+                    percent, f"保存解析报告 {index + 1}/{total}"
                 )
         return result
 

@@ -8,6 +8,11 @@ jieba==0.42.1
 reportlab==4.2.2
 cryptography==50.0.1
 PyMuPDF==1.28.2  # PDF 应用内原貌渲染（随 .vendor 目录内置，亦可全局安装）
+langchain-core==1.6.9  # ReAct Agent 工具抽象（BaseTool），仅用核心包不引 openai 集成
+langgraph==1.2.14      # ReAct Agent 状态图编排（StateGraph/条件边/循环保护）
+Pillow==12.3.0         # 页面截图处理（本地 OCR 前置；PyMuPDF 部分功能同样依赖）
+# pytesseract==0.3.13  # 可选：扫描件/图表页本地 OCR，另需系统安装 Tesseract + chi_sim 中文语言包；
+                        # 未安装时自动降级为 AI 视觉解析（模型需勾选支持视觉）或提示用户
 
 # ---- 开发/测试依赖 ----
 pytest==9.1.1

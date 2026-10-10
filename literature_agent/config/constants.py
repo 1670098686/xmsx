@@ -218,7 +218,10 @@ IMPORT_COL_WIDTHS = (420, 80, 170, 100, IMPORT_TABLE_ACTION_COL_WIDTH)
 # ========== AI 模型服务（OpenAI 兼容接口：原件直传，不做本地文本提取）==========
 AI_FILE_PURPOSE = "file-extract"   # 文件上传用途（qwen-long/兼容接口约定）
 AI_TIMEOUT_UPLOAD = 120            # 原件上传超时（秒，大文件）
-AI_TIMEOUT_CHAT = 180              # 模型解析响应超时（秒）
+AI_TIMEOUT_CHAT = 800              # 模型解析响应超时（秒，全文 4.8 万字 + 8192 输出留足生成时间）
+# AI 请求等待期间进度条心跳间隔（秒）：长文档生成常需 1-5 分钟，
+# 周期提示"仍在思考中"避免用户误以为界面卡死
+AI_WAIT_HEARTBEAT_SEC = 15
 AI_TEMPERATURE = 0.2               # 结构化解析要求稳定输出
 # 单次响应上限：推理类模型（如 qwen3 系列）的思维链也占用该预算，
 # 解析长文献需输出多维度完整 JSON，4096 易把正文 JSON 截断导致解析失败，
@@ -257,8 +260,11 @@ AI_FILE_ID_UNSUPPORTED_HINT = (
 # Base64 体积约膨胀 1/3，官方提示约 150MB 文件编码后约 200MB 会超请求体上限，
 # 故本地保守限制源文件 100MB，超限改走全文文本通道
 AI_PDF_INLINE_MAX_BYTES = 100 * 1024 * 1024
-# 内联 PDF 需要随请求上传并由服务端解析，给予比普通对话更长的超时（秒）
-AI_TIMEOUT_PDF_CHAT = 300
+# 内联 PDF 需要随请求上传并由服务端解析，给予比普通对话更长的超时（秒）。
+# 3.7 万字、Base64 后 5.7MB 的 PDF 实测 300 秒不足以等回六维度结果，放宽至 800 秒
+AI_TIMEOUT_PDF_CHAT = 800
+# 单页图片视觉 OCR（扫描件/图表页）请求超时（秒）
+AI_TIMEOUT_VISION_CHAT = 180
 
 # 原件解析通道（每个模型可单独配置，支持任意兼容该协议的 PDF 模型）：
 # auto      自动识别：按模型名关键字预判；校验配置时依次实测两种通道并记录结果
@@ -294,3 +300,154 @@ AI_FILE_CHANNEL_SHORT_LABELS = {
 # 外部进程仍可能瞬时占用文件，首次 os.remove 遇 WinError 32 时短暂重试
 FILE_DELETE_MAX_ATTEMPTS = 3      # 总尝试次数（含首次）
 FILE_DELETE_RETRY_INTERVAL = 0.2  # 每次重试前等待（秒）
+
+# ========== ReAct 文献解析 Agent（agent/ 编排层）==========
+AGENT_MAX_STEPS = 8                     # ReAct 循环最大工具调用步数
+AGENT_REFINE_MAX_ATTEMPTS = 2           # 同一维度同一类校验问题最多补救次数
+# AI 主导编排：Director LLM 连续返回非法/无法执行决策的次数上限，
+# 达到后放弃 LLM 编排转确定性兜底，防止模型持续输出无效动作耗尽步数
+AGENT_DIRECTOR_MAX_LLM_FAILURES = 2
+# 一致性校验：AI 解读与本地章节的词集 Jaccard 重叠度下限，
+# 同时要求 AI 文本长度不超过本地章节的该倍数（两条件同时违例才判矛盾）
+AGENT_VERIFY_OVERLAP_MIN = 0.12
+AGENT_VERIFY_AI_LOCAL_LEN_RATIO = 3.0
+# 溯源校验（原口径）：单个引用段落词集中被 AI 解读命中的比例下限。
+# 注意分母是段落词数——仅对小段严格有效；PDF 段落可能偏大（数百词），
+# 该口径数学上不可达，故同时采用下方"AI 侧覆盖率"口径，任一满足即通过
+AGENT_VERIFY_CITATION_COVER_MIN = 0.15
+# 溯源校验（AI 侧口径）：AI 解读实词中能在其所引全部锚点段落里找到的
+# 比例下限；锚点段落允许聚合 1-3 个。忠于原文的解读通常 >=0.5
+AGENT_VERIFY_CITATION_AI_COVER_MIN = 0.35
+# 溯源校验：AI 解读与锚点段落的共同实词数下限（防极短文本偶然命中）
+AGENT_VERIFY_CITATION_COMMON_WORDS_MIN = 3
+# 本地章节原文短于该字数时不参与一致性比对（章节误切时避免误判）
+AGENT_VERIFY_MIN_LOCAL_CHARS = 30
+# 整体 AI 解读提速：本地章节达到该字数即视为内容充实，
+# 该维度不再交 AI 复述（直接用本地原文）；全部维度充实则跳过本次 AI 调用
+AGENT_LOCAL_DIM_SELF_SUFFICIENT_CHARS = 50
+# 喂给规划器/观测的文献片段长度
+AGENT_PLAN_TEXT_HEAD = 2000
+AGENT_OBSERVATION_TEXT_HEAD = 1200
+
+# ========== 阶段2：原件视觉感知（inspect_document / ocr_page） ==========
+AGENT_INSPECT_SAMPLE_PAGES = 5      # 布局探测抽样页数（只抽前 N 页，毫秒级）
+AGENT_OCR_DPI = 300                 # OCR 页面渲染分辨率
+AGENT_OCR_LANG = "chi_sim+eng"      # 本地 Tesseract 识别语言包
+# 单页可提取文本少于该字数视为"无文本层"（扫描页）
+AGENT_LAYOUT_PAGE_TEXT_MIN_CHARS = 20
+# 抽样页中无文本层页面占比达到该值即判定整篇为扫描件
+AGENT_LAYOUT_SCANNED_RATIO = 0.8
+# 页面内嵌图片覆盖面积占比达到该值视为"图表页"（排除小 logo/分隔图）
+AGENT_LAYOUT_FIGURE_AREA_RATIO = 0.25
+# 双栏判定：中央带低覆盖中缝最小宽度（pt），且中缝两侧词数/字数下限
+# （中文无空格，PyMuPDF 按行聚合成"词"，故同时要求两侧字数）
+AGENT_LAYOUT_GUTTER_MIN_PT = 12
+AGENT_LAYOUT_COLUMN_SIDE_WORDS = 2
+AGENT_LAYOUT_COLUMN_SIDE_CHARS = 20
+# 扫描件循环步数：N 页 OCR + 尾部（结构/关键词/AI）+ 补救余量
+AGENT_SCANNED_STEP_TAIL = 6
+# OCR 进度区间（早段泳道）：扫描件 OCR 是"提取阶段"（10→28）；
+# 图文混合的图表页补充识别排在关键词之后（56→61）
+AGENT_PCT_OCR_SCAN_START = 10
+AGENT_PCT_OCR_SCAN_END = 28
+AGENT_PCT_OCR_FIGURE_START = 56
+AGENT_PCT_OCR_FIGURE_END = 61
+# OCR 进度区间（原件泳道）：原件直读失败后的扫描件逐页 OCR 是 62→66 的
+# 降级基线段（与护栏 extract_text 同段，二者不会在同一链路同时出现）；
+# 降级结构化尾部的图表页补充识别排在关键词之后（72→75）；
+# 原件成功链的图表页 OCR 由 Director 预规划排定，进度在 70→78 段内打标
+AGENT_PCT_OCR_LATE_SCAN_START = 62
+AGENT_PCT_OCR_LATE_SCAN_END = 66
+AGENT_PCT_OCR_LATE_FIGURE_START = 72
+AGENT_PCT_OCR_LATE_FIGURE_END = 75
+# 图表页 OCR 文本并入全文时的分隔标题（也让 AI 能区分其来源）
+AGENT_FIGURE_OCR_BLOCK_TITLE = "图表页识别文字"
+
+# ========== 表格结构化提取（extract_tables，Director 按需显式调用） ==========
+# 表格 Markdown 块并入全文时的分隔标题（PDF 按页分块；DOCX 用「Word表N」）
+AGENT_TABLE_BLOCK_TITLE = "表格数据"
+# 单次抽表返回的表格数量上限（体检只抽样页提示；全量抽表由此兜底防爆量）
+AGENT_TABLE_MAX_DEFAULT = 20
+
+# ========== Agent 文献画像与自适应策略 ==========
+AGENT_SHORT_TEXT_CHARS = 1500        # 短文献阈值（短摘要/简讯）：精简动作、少提关键词
+AGENT_SHORT_KEYWORD_TOP_N = 10       # 短文献关键词条数
+AGENT_HEADING_DENSE_COUNT = 6        # 章节标题命中数达到该值视为章节密集
+# 文献类型判定关键词（在标题/开头片段中匹配，命中即归类）
+AGENT_SURVEY_KEYWORDS = ("综述", "研究进展", "文献综述", "review", "survey")
+AGENT_EXPERIMENT_KEYWORDS = ("实验", "数据集", "消融", "experiment", "实证")
+# 画像类型稳定标识
+LIT_KIND_SHORT = "short_paper"
+LIT_KIND_SURVEY = "survey"
+LIT_KIND_EXPERIMENTAL = "experimental"
+LIT_KIND_STANDARD = "standard"
+
+# ========== Agent 进度条节奏（内部区间 8-90；5/95/100 由业务层负责） ==========
+# 进度分两条泳道，按"是否已尝试原件直读（ai_read_original）"选择锚点，
+# 任何链路下百分比都必须单调不减：
+# - 早段泳道（离线 / 无原件通道，从未尝试直读）：
+#   inspect 8-10 → 提取 / 扫描 OCR 10-28 → 结构 30-42 → 关键词 48-55
+#   → 图表页 OCR 56-61 → 文本通道 AI 62-75 → 校验 62/77；
+# - 原件泳道（直读成功或失败后的全部动作）：
+#   ai_read_original 12-70（含 function calling 读中多轮工具调用，轮次在段内
+#   推进）→ 本地关键词收尾 72-74（扫描件基线 OCR / 条件结构识别在同段显式打标）
+#   → 信任校验 76 / 完整校验 77
+#   → 仍缺维度的 Director 单步补救 80-84 → Refine 补救 85-88/封顶 89 → 收尾 90。
+AGENT_PCT_START = 8                    # Plan：准备解析任务
+AGENT_PCT_REFLECT = 24                 # 早段泳道：文献画像与动作规划完成
+AGENT_PCT_ORIGINAL_READ_START = 12     # 原件直读开始（与 inspect 完成 10 衔接）
+AGENT_PCT_ORIGINAL_READ_END = 70       # 原件直读+读中工具循环完成（主段终点）
+# 原件通读成功后的条件本地基线段（扫描件补页 OCR / 缺全文时补提取 /
+# AI 未给参考文献时条件触发章节识别）：读中循环已取证的内容不再重复执行
+AGENT_PCT_ORIGINAL_BASELINE = 71
+AGENT_PCT_KEYWORD_TAIL_START = 72      # 原件通读后的本地关键词收尾段
+AGENT_PCT_KEYWORD_TAIL_END = 74
+AGENT_PCT_VERIFY_TRUSTED = 76          # 原件信任旁路：只查完整性
+AGENT_PCT_VERIFY_FIRST = 77            # 首次完整三重校验
+AGENT_PCT_VERIFY_FIRST_NO_AI = 62      # 纯本地链路首次校验（紧跟图表 OCR 61）
+# 信任校验后仍缺维度时，Director 单步补救动作段（Verify 之前）
+AGENT_PCT_STAGE5_START = 80
+AGENT_PCT_STAGE5_END = 84
+AGENT_PCT_REFINE_BASE = 85             # Refine 补救阶段起点（随步数推进，封顶 89）
+AGENT_PCT_VERIFY_RETRY = 88            # 补救后再次校验
+AGENT_PCT_REFINE_ACTION_CAP = 89       # Refine 补救动作进行/完成封顶（88 与 90 之间）
+AGENT_PCT_FINISH = 90                  # Finish：智能体流程结束，等待业务层落库
+# 原件直读成功后，额外为 Director 单步补维度预留的步数
+AGENT_DIRECTOR_STEP_RESERVE = 3
+
+# ========== 读中 function calling 多轮循环（ai_read_original 内部） ==========
+# AI 通读原件时自主发起工具调用的最大轮数（每轮可含多个并行 tool_calls），
+# 达到上限后强制要求模型用现有结果收尾，防止工具调用死循环
+AGENT_TOOL_MAX_ROUNDS = 5
+# 单个工具执行结果回灌给模型的字符上限（超长表格/OCR 文本截断，防多轮上下文膨胀）
+AGENT_TOOL_RESULT_MAX_CHARS = 6000
+# 单个工具结果截断后保留的尾部长度（保证表格末尾的结论行不被裁掉）
+AGENT_TOOL_RESULT_TAIL_CHARS = 1000
+# 读中工具的总调用次数上限（跨轮累计，与轮数上限双重约束）
+AGENT_TOOL_MAX_CALLS = 8
+
+# 早段泳道工具锚点（离线 / 扫描件无通道 / 原件从未尝试）
+AGENT_TOOL_PROGRESS_EARLY = {
+    "extract_text": (10, 14),
+    "detect_structure": (30, 42),
+    "extract_keywords": (48, 55),
+    "ai_deep_analyze": (62, 75),
+}
+# 原件泳道工具锚点（仅用于直读失败降级后的结构化尾部：
+# extract → detect → keywords → 图表 OCR → 文本通道 AI）；
+# 原件成功链的关键词/条件基线由 Reflect 显式打标 72-74，不查本表
+AGENT_TOOL_PROGRESS_LATE = {
+    "extract_text": (62, 65),
+    "detect_structure": (66, 68),
+    "extract_keywords": (69, 71),
+    "extract_tables": (72, 75),
+    "ai_deep_analyze": (76, 81),
+}
+# 全链路共享锚点（与泳道无关）；保留 AGENT_TOOL_PROGRESS 名兼容其余引用，
+# 内容为共享锚点 + 早段泳道（Act/Observe 取锚点统一走 tool_progress_pair）
+AGENT_TOOL_PROGRESS = {
+    "inspect_document": (8, 10),
+    "ai_read_original": (AGENT_PCT_ORIGINAL_READ_START,
+                         AGENT_PCT_ORIGINAL_READ_END),
+    **AGENT_TOOL_PROGRESS_EARLY,
+}

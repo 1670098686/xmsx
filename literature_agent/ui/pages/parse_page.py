@@ -91,7 +91,7 @@ class ParsePage(QWidget):
         self.btn_export = GhostButton("导出报告")
         self.btn_delete_report = DangerButton("删除报告")
         export_menu = QMenu(self)
-        action_save_lib = export_menu.addAction("保存到资料库…")
+        action_save_lib = export_menu.addAction("保存到报告目录…")
         action_save_lib.triggered.connect(self._save_current_to_library)
         export_menu.addSeparator()
         for text, fmt in (("导出为 Word（另存为…）", "word"),
@@ -411,7 +411,7 @@ class ParsePage(QWidget):
         self._pending_ai_notices = []
 
     def _on_finished_all(self, success: list, failed: list) -> None:
-        """批量解析结束后汇总成功与失败，并引导保存报告到资料库。"""
+        """批量解析结束后汇总成功与失败，并引导保存报告到报告存储目录。"""
         if self._loading:
             self._loading.hide_mask()
         self._set_running(False)
@@ -427,19 +427,19 @@ class ParsePage(QWidget):
             engines = {item.get("parse_engine", "local") for item in success}
             if len(success) == 1:
                 toast_msg = {
-                    "ai_file": "解析完成：AI 已通读原件",
-                    "ai_text": "解析完成：AI 已通读全文文本",
-                    "local": "解析完成（本地规则，AI 不可用）",
+                    "agent_ai": "解析完成：ReAct 智能体已完成结构化解读",
+                    "agent_local": "解析完成：ReAct 智能体采用本地章节基线",
+                    "local": "解析完成（本地规则兜底）",
                 }.get(next(iter(engines)), "解析完成")
-            elif engines <= {"ai_file", "ai_text"}:
-                toast_msg = f"解析完成：AI 已通读 {len(success)} 篇文献"
+            elif engines <= {"agent_ai", "agent_local"}:
+                toast_msg = f"解析完成：ReAct 智能体共完成 {len(success)} 篇"
             else:
-                toast_msg = f"解析完成 {len(success)} 篇（部分使用本地规则）"
+                toast_msg = f"解析完成 {len(success)} 篇（部分使用本地规则兜底）"
             show_toast(toast_msg, "success", parent=self.window())
         self.refresh()
         # AI 错误必须显式弹窗告知（聚合一次，避免批量时弹窗轰炸）
         self._show_ai_notices()
-        # 解析流程最后一步：选择格式并保存到项目资料库
+        # 解析流程最后一步：选择格式并保存到解析报告存储目录
         if success:
             self._prompt_save_to_library(success)
 
@@ -479,10 +479,10 @@ class ParsePage(QWidget):
                    parent=self.window())
         self.refresh()
 
-    # ================= 保存报告到资料库 =================
+    # ================= 保存报告到解析报告存储目录 =================
 
     def _save_current_to_library(self) -> None:
-        """手动把当前文献已解析的报告选择格式后保存到资料库。"""
+        """手动把当前文献已解析的报告选择格式后保存到报告存储目录。"""
         lit_id = self.current_lit_id()
         if not lit_id:
             show_toast("请先选择并解析文献", "warn", parent=self.window())
@@ -500,11 +500,11 @@ class ParsePage(QWidget):
         self._library_worker.progress.connect(self._on_library_progress)
         self._library_worker.finished_all.connect(self._on_library_saved)
         self._loading = LoadingMask(self)
-        self._loading.show_progress(self, "正在保存解析报告到资料库...")
+        self._loading.show_progress(self, "正在保存解析报告...")
         self._library_worker.start()
 
     def _prompt_save_to_library(self, success_reports: list) -> None:
-        """解析完成后弹窗选择格式，并在子线程把报告保存到资料库。
+        """解析完成后弹窗选择格式，并在子线程把报告保存到报告存储目录。
 
         Args:
             success_reports: 本次解析成功的报告字典列表（含关键词附加信息）。
@@ -527,24 +527,27 @@ class ParsePage(QWidget):
         self._library_worker.progress.connect(self._on_library_progress)
         self._library_worker.finished_all.connect(self._on_library_saved)
         self._loading = LoadingMask(self)
-        self._loading.show_progress(self, "正在保存解析报告到资料库...")
+        self._loading.show_progress(self, "正在保存解析报告...")
         self._library_worker.start()
 
     def _on_library_progress(self, percent: int, message: str) -> None:
-        """资料库保存进度更新。"""
+        """报告保存进度更新。"""
         if self._loading:
             self._loading.show_percent(percent, message)
 
     def _on_library_saved(self, result: dict) -> None:
-        """资料库批量保存结束后提示结果。"""
+        """报告批量保存结束后提示结果与保存目录。"""
         if self._loading:
             self._loading.hide_mask()
         self._library_worker = None
-        success_count = len(result.get("success", []))
+        success_paths = result.get("success", [])
+        success_count = len(success_paths)
         failed = result.get("failed", [])
         if success_count and not failed:
-            show_toast(f"已保存 {success_count} 篇解析报告到资料库", "success",
-                       parent=self.window())
+            tip = f"已保存 {success_count} 篇解析报告到报告存储目录"
+            if success_paths:
+                tip += f"\n{os.path.dirname(success_paths[0])}"
+            show_toast(tip, "success", parent=self.window())
         elif success_count:
             show_toast(
                 f"{success_count} 篇已保存，{len(failed)} 篇保存失败："

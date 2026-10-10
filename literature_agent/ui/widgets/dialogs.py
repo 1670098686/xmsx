@@ -226,7 +226,7 @@ class InputDialog(QDialog):
 
 
 class ExportFormatDialog(QDialog):
-    """解析完成后选择报告文件格式并保存到资料库的对话框。"""
+    """解析完成后选择报告文件格式并保存到解析报告存储目录的对话框。"""
 
     def __init__(self, parent=None, lit_count: int = 1):
         """初始化格式选择控件。
@@ -251,13 +251,14 @@ class ExportFormatDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(12)
 
-        title_label = QLabel("保存解析报告到资料库")
+        title_label = QLabel("保存解析报告")
         title_label.setObjectName("pageTitle")
         layout.addWidget(title_label)
         target = "该篇文献的解析报告" if lit_count <= 1 else \
             f"本次解析成功的 {lit_count} 篇文献报告"
         content = QLabel(
-            f"{target}将以所选格式保存到文献资料库（与上传的文献原件同一目录），"
+            f"{target}将以所选格式保存到解析报告存储目录"
+            "（管理中心可配置，与上传的文献原件目录分开），"
             "历史版本会自动保留。"
         )
         content.setWordWrap(True)

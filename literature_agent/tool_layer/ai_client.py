@@ -16,7 +16,9 @@ import json
 import mimetypes
 import os
 import re
+import socket
 import tempfile
+import threading
 import time
 import uuid
 import urllib.error
@@ -51,8 +53,86 @@ def is_file_message_rejected(message: str) -> bool:
     Returns:
         True 表示属于协议不支持（可降级全文文本），False 为其他错误。
     """
+    raw = message or ""
+    low = raw.lower()
+    file_mentioned = ("file" in low) or ("文件" in raw) or ("附件" in raw)
+    return file_mentioned and any(k in low for k in _FILE_REJECTED_KEYWORDS)
+
+
+# 原件（PDF 内联）体积超限类报错特征：换成全文文本通道仍可解析
+_FILE_OVERSIZE_KEYWORDS = (
+    "过大", "超限", "超过内联", "上限", "too large", "exceed",
+    "request entity too large", "413",
+)
+
+
+def is_file_channel_degradable(message: str) -> bool:
+    """原件直传失败时，是否适合自动换轨全文文本通道。
+
+    - 协议不支持（模型不接受 file 类型消息）：文本通道必然可用，应降级；
+    - PDF 体积超内联上限：文本通道不受此限制，应降级；
+    - 网络超时、鉴权失败、限流、5xx 等：换文本通道大概率同样失败，
+      不应降级，直接转本地基线，避免无意义的重试。
+
+    Args:
+        message: 模型服务返回的错误原文。
+    Returns:
+        True 表示可安全降级全文文本；False 表示应终止 AI 尝试。
+    """
+    if is_file_message_rejected(message):
+        return True
     low = (message or "").lower()
-    return "file" in low and any(k in low for k in _FILE_REJECTED_KEYWORDS)
+    return any(k in low for k in _FILE_OVERSIZE_KEYWORDS)
+
+
+# function calling 不被网关接受时的报错特征（用于 Plan A 同框 → Plan B
+# 分段取证的自动降级；只认协议参数类错误，网络/鉴权/超时不得误判）
+_TOOLS_REJECTED_KEYWORDS = (
+    "tools", "tool_choice", "tool_calls", "function",
+    "unknown parameter", "unexpected field", "unrecognized",
+    "invalid parameter", "参数不支持", "不支持的参数", "未知参数",
+)
+_TOOLS_REJECTED_PROTOCOL_HINTS = ("400", "bad request", "invalid",
+                                  "unsupported", "不支持")
+
+
+def is_tools_unsupported(message: str) -> bool:
+    """判断报错是否表示"网关不接受 tools/function calling 字段（或与 file 同框）"。
+
+    必须同时命中一个 tools 协议词与一个 4xx/协议提示，避免把网络、鉴权
+    类错误误判成协议降级（那两类错误重试 tools 也不会成功）。
+
+    Args:
+        message: 模型服务返回的错误原文。
+    Returns:
+        True 表示可切换到 Plan B（分段取证 + 原子通读）。
+    """
+    low = (message or "").lower()
+    hit_tool_word = any(word in low for word in _TOOLS_REJECTED_KEYWORDS)
+    hit_proto = any(hint in low for hint in _TOOLS_REJECTED_PROTOCOL_HINTS)
+    return hit_tool_word and hit_proto
+
+
+# 全文文本通道"输入超长"类报错特征：缩短输入（如只喂章节原文）后仍可能成功，
+# 不应直接判定 AI 通道整体不可用
+_TEXT_TOO_LONG_KEYWORDS = (
+    "maximum context length", "context_length_exceeded", "context length",
+    "maximum tokens", "token length", "input length", "too long",
+    "reduce the length", "上下文", "长度", "太长",
+)
+
+
+def is_context_length_error(message: str) -> bool:
+    """判断文本通道失败是否由"输入超长"引起（缩短输入后可重试）。
+
+    Args:
+        message: 模型服务返回的错误原文。
+    Returns:
+        True 表示属于超长类错误（章节级短文本补救仍有意义）；
+        False 表示网络/鉴权/其他致命错误，应终止 AI 尝试。
+    """
+    low = (message or "").lower()
+    return any(k in low for k in _TEXT_TOO_LONG_KEYWORDS)
 
 
 def friendly_file_error(message: str) -> str:
@@ -73,7 +153,18 @@ def normalize_base_url(base_url: str) -> str:
     return (base_url or "").strip().rstrip("/")
 
 
-def _http_post(url: str, headers: dict, body: bytes, timeout: int) -> dict:
+def _timeout_message(timeout: int) -> str:
+    """统一的模型响应超时提示（与网络断开类错误区分，避免误导用户排查网络）。"""
+    return (
+        f"模型服务响应超时（已等待约 {int(timeout)} 秒仍未收到完整结果）："
+        "可能是服务端排队或长文档生成耗时过久，请稍后重试，"
+        "或在 AI 设置中更换响应更快的模型"
+    )
+
+
+def _http_post(url: str, headers: dict, body: bytes, timeout: int,
+               on_waiting=None,
+               wait_interval: int = C.AI_WAIT_HEARTBEAT_SEC) -> dict:
     """发起 POST 并解析 JSON 响应，统一包装网络/协议异常。
 
     Args:
@@ -81,35 +172,70 @@ def _http_post(url: str, headers: dict, body: bytes, timeout: int) -> dict:
         headers: 请求头字典。
         body: 已编码的请求体字节。
         timeout: 超时秒数。
+        on_waiting: 可选回调 (elapsed_seconds:int)->None，请求等待期间每
+            wait_interval 秒由守护线程调用一次，用于进度条"仍在思考"心跳；
+            回调内部异常不影响请求。
+        wait_interval: 心跳间隔秒数。
     Returns:
         解析后的 JSON 字典。
     Raises:
         AIServiceError: 网络异常、非 200 状态或响应非 JSON。
     """
+    logger.debug("AI 请求开始：POST %s（请求体 %s 字节，超时 %s 秒）",
+                 url, len(body or b""), timeout)
+    started = time.monotonic()
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    stop_event = threading.Event()
+    if on_waiting is not None:
+        started_at = time.monotonic()
+
+        def _heartbeat() -> None:
+            while not stop_event.wait(max(0.05, float(wait_interval))):
+                try:
+                    on_waiting(int(time.monotonic() - started_at))
+                except Exception:  # 心跳是旁路能力，任何异常都不得影响请求
+                    pass
+
+        threading.Thread(target=_heartbeat, daemon=True).start()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:300]
+        logger.debug("AI 请求失败：HTTP %s，耗时 %.1f 秒",
+                     exc.code, time.monotonic() - started, exc_info=True)
         raise AIServiceError(f"模型服务返回错误（{exc.code}）：{detail}") from exc
-    except urllib.error.URLError as exc:
-        raise AIServiceError(f"无法连接模型服务：{exc.reason}") from exc
     except TimeoutError as exc:
-        raise AIServiceError("连接模型服务超时，请检查网络或稍后重试") from exc
+        # Python 3.10+ socket.timeout 即 TimeoutError；部分环境 urllib 会把它
+        # 包进 URLError（下方再兜底判一次）
+        logger.debug("AI 请求超时，耗时 %.1f 秒",
+                     time.monotonic() - started, exc_info=True)
+        raise AIServiceError(_timeout_message(timeout)) from exc
+    except urllib.error.URLError as exc:
+        logger.debug("AI 请求网络异常，耗时 %.1f 秒",
+                     time.monotonic() - started, exc_info=True)
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise AIServiceError(_timeout_message(timeout)) from exc
+        raise AIServiceError(f"无法连接模型服务：{exc.reason}") from exc
+    finally:
+        stop_event.set()
+    logger.debug("AI 请求成功：响应 %s 字节，耗时 %.1f 秒",
+                 len(raw), time.monotonic() - started)
     try:
         return json.loads(raw)
     except (TypeError, ValueError) as exc:
         raise AIServiceError("模型服务返回了无法识别的内容") from exc
 
 
-def upload_file(base_url: str, api_key: str, file_path: str) -> str:
+def upload_file(base_url: str, api_key: str, file_path: str,
+                on_waiting=None) -> str:
     """将文献原始文件上传到模型服务，返回 file_id。
 
     Args:
         base_url: OpenAI 兼容网关根地址。
         api_key: 明文 API 密钥（仅内存传递，不落日志）。
         file_path: 文献原件绝对路径（PDF/DOCX/TXT 等）。
+        on_waiting: 可选等待心跳回调（已等待秒数），大文件上传时反馈进度。
     Returns:
         服务端分配的 file_id 字符串。
     Raises:
@@ -119,6 +245,8 @@ def upload_file(base_url: str, api_key: str, file_path: str) -> str:
         raise AIServiceError("文献原件不存在，无法上传解析")
     with open(file_path, "rb") as fp:
         file_bytes = fp.read()
+    logger.debug("AI 原件上传：%s（%s KB）",
+                 os.path.basename(file_path), len(file_bytes) // 1024)
 
     boundary = f"----litagent{uuid.uuid4().hex}"
     filename = os.path.basename(file_path)
@@ -148,6 +276,7 @@ def upload_file(base_url: str, api_key: str, file_path: str) -> str:
     data = _http_post(
         f"{normalize_base_url(base_url)}/files",
         headers, body, C.AI_TIMEOUT_UPLOAD,
+        on_waiting=on_waiting,
     )
     file_id = data.get("id") or (data.get("data") or {}).get("id")
     if not file_id:
@@ -157,7 +286,8 @@ def upload_file(base_url: str, api_key: str, file_path: str) -> str:
 
 def chat_with_file(base_url: str, api_key: str, model: str,
                    file_id: str, prompt: str,
-                   system_prompt: str = None) -> str:
+                   system_prompt: str = None,
+                   on_waiting=None) -> str:
     """让模型直接阅读已上传的原件并返回文本结果（仅支持文件消息的模型可用）。
 
     Args:
@@ -167,6 +297,7 @@ def chat_with_file(base_url: str, api_key: str, model: str,
         file_id: upload_file 返回的文件标识。
         prompt: 解析指令（要求结构化 JSON 输出）。
         system_prompt: 可选系统提示词。
+        on_waiting: 可选等待心跳回调（已等待秒数）。
     Returns:
         模型输出的文本内容。
     Raises:
@@ -182,12 +313,14 @@ def chat_with_file(base_url: str, api_key: str, model: str,
             {"type": "text", "text": prompt},
         ],
     })
-    return _post_chat(base_url, api_key, model, messages)
+    return _post_chat_text(base_url, api_key, model, messages,
+                           on_waiting=on_waiting)
 
 
 def chat_with_local_pdf(base_url: str, api_key: str, model: str,
                         file_path: str, prompt: str,
-                        system_prompt: str = None) -> str:
+                        system_prompt: str = None,
+                        on_waiting=None) -> str:
     """把本地 PDF 原件以 Base64 内联方式发给模型直接阅读（qwen3.8 系列）。
 
     协议（DashScope OpenAI 兼容模式 PDF 理解）：
@@ -202,6 +335,7 @@ def chat_with_local_pdf(base_url: str, api_key: str, model: str,
         file_path: 本地 PDF 原件绝对路径。
         prompt: 解析指令（要求结构化 JSON 输出）。
         system_prompt: 可选系统提示词。
+        on_waiting: 可选等待心跳回调（已等待秒数）。
     Returns:
         模型输出的文本内容。
     Raises:
@@ -237,16 +371,67 @@ def chat_with_local_pdf(base_url: str, api_key: str, model: str,
             {"type": "text", "text": prompt},
         ],
     })
-    return _post_chat(
+    return _post_chat_text(
         base_url, api_key, model, messages,
-        timeout=C.AI_TIMEOUT_PDF_CHAT,
+        timeout=C.AI_TIMEOUT_PDF_CHAT, on_waiting=on_waiting,
+    )
+
+
+def chat_with_vision(base_url: str, api_key: str, model: str,
+                     image_bytes: bytes, prompt: str,
+                     image_mime: str = "image/png",
+                     system_prompt: str = None,
+                     on_waiting=None) -> str:
+    """把单页渲染图片以多模态消息发给视觉模型做 OCR/图表识别。
+
+    走 OpenAI 兼容视觉协议（image_url + Base64 data URI）：
+    content=[{"type":"text","text":指令},
+             {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]。
+    图片仅随本次请求发送给用户配置的接口，不落盘不外传第三方。
+
+    Args:
+        base_url: OpenAI 兼容网关根地址。
+        api_key: 明文 API 密钥（仅内存传递，不落日志）。
+        model: 模型名称（须为支持视觉理解的多模态模型）。
+        image_bytes: 页面渲染图片字节（PNG/JPEG）。
+        prompt: OCR/识别指令。
+        image_mime: 图片 MIME 类型，默认 image/png。
+        system_prompt: 可选系统提示词。
+        on_waiting: 可选等待心跳回调（已等待秒数）。
+    Returns:
+        模型识别出的页面文本。
+    Raises:
+        AIServiceError: 图片为空或调用失败。
+    """
+    if not image_bytes:
+        raise AIServiceError("页面图片为空，无法进行视觉识别")
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{image_mime};base64,{image_b64}",
+                },
+            },
+        ],
+    })
+    return _post_chat_text(
+        base_url, api_key, model, messages,
+        timeout=C.AI_TIMEOUT_VISION_CHAT, on_waiting=on_waiting,
     )
 
 
 def chat_with_text(base_url: str, api_key: str, model: str,
                    full_text: str, prompt: str,
                    system_prompt: str = None,
-                   max_tokens: int = None) -> str:
+                   max_tokens: int = None,
+                   on_waiting=None) -> str:
     """把从原件完整提取的全文作为普通文本消息发给模型解析。
 
     适用于不支持文件消息但支持长上下文的模型（如 qwen-max）：
@@ -260,6 +445,7 @@ def chat_with_text(base_url: str, api_key: str, model: str,
         prompt: 解析指令（要求结构化 JSON 输出）。
         system_prompt: 可选系统提示词。
         max_tokens: 可选响应 token 上限覆盖。
+        on_waiting: 可选等待心跳回调（已等待秒数）。
     Returns:
         模型输出的文本内容。
     Raises:
@@ -275,13 +461,18 @@ def chat_with_text(base_url: str, api_key: str, model: str,
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": user_content})
-    return _post_chat(base_url, api_key, model, messages, max_tokens)
+    return _post_chat_text(base_url, api_key, model, messages, max_tokens,
+                           on_waiting=on_waiting)
 
 
 def _post_chat(base_url: str, api_key: str, model: str,
                messages: list, max_tokens: int = None,
-               timeout: int = None) -> str:
-    """统一的 chat/completions 请求，解析 choices 文本。
+               timeout: int = None, on_waiting=None,
+               tools: list = None, tool_choice: str = None) -> dict:
+    """统一的 chat/completions 请求，解析 choices[0].message。
+
+    支持 OpenAI 兼容 function calling：传入 tools 时模型可能返回 tool_calls
+    而非正文（此时 content 为空串是正常现象，由调用方驱动多轮循环）。
 
     Args:
         base_url: OpenAI 兼容网关根地址。
@@ -290,17 +481,37 @@ def _post_chat(base_url: str, api_key: str, model: str,
         messages: OpenAI 消息体。
         max_tokens: 可选响应 token 上限覆盖。
         timeout: 可选请求超时秒数覆盖（默认普通对话超时）。
+        on_waiting: 可选等待心跳回调（已等待秒数）。
+        tools: 可选 OpenAI 工具 schema 列表（function calling）。
+        tool_choice: 可选工具选择策略（"auto"/"required"/None）。
     Returns:
-        模型输出文本。
+        {"content": str, "tool_calls": list, "finish_reason": str}：
+        tool_calls 为模型请求调用的工具列表（无则空列表）。
     Raises:
         AIServiceError: 调用失败或响应结构异常。
     """
+    kinds = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            kinds.extend(str(item.get("type", "?")) for item in content)
+        elif content:
+            kinds.append("text")
+    logger.debug(
+        "AI 对话调用：模型=%s，消息部件=%s，共 %s 条消息，tools=%s，"
+        "max_tokens=%s，超时 %s 秒",
+        model, ",".join(kinds) or "text", len(messages),
+        len(tools) if tools else 0,
+        max_tokens or C.AI_MAX_TOKENS, timeout or C.AI_TIMEOUT_CHAT)
     payload = {
         "model": model,
         "messages": messages,
         "temperature": C.AI_TEMPERATURE,
         "max_tokens": max_tokens or C.AI_MAX_TOKENS,
     }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice or "auto"
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -309,27 +520,106 @@ def _post_chat(base_url: str, api_key: str, model: str,
     data = _http_post(
         f"{normalize_base_url(base_url)}/chat/completions",
         headers, body, timeout or C.AI_TIMEOUT_CHAT,
+        on_waiting=on_waiting,
     )
     try:
         choice = data["choices"][0]
         message = choice.get("message") or {}
         content = message.get("content") or ""
+        tool_calls = message.get("tool_calls") or []
         finish_reason = str(choice.get("finish_reason") or "").lower()
     except (KeyError, IndexError, TypeError, AttributeError) as exc:
         raise AIServiceError("模型响应结构异常，未包含解析结果") from exc
+    return {
+        "content": str(content),
+        "tool_calls": tool_calls if isinstance(tool_calls, list) else [],
+        "finish_reason": finish_reason,
+    }
+
+
+def _post_chat_text(base_url: str, api_key: str, model: str,
+                    messages: list, max_tokens: int = None,
+                    timeout: int = None, on_waiting=None) -> str:
+    """_post_chat 的纯文本包装：校验正文非空/未截断后返回 content 字符串。
+
+    Args:
+        同 _post_chat（不含 tools）。
+    Returns:
+        模型输出文本。
+    Raises:
+        AIServiceError: 响应正文为空或因长度上限被截断。
+    """
+    result = _post_chat(base_url, api_key, model, messages, max_tokens,
+                        timeout, on_waiting)
     # 推理模型思维链过长会耗尽输出预算：此时 JSON 正文被截断或根本没开始，
     # 继续解析只会得到模糊错误，直接给出可触发降级的明确原因
-    if finish_reason == "length":
+    if result["finish_reason"] == "length":
         raise AIServiceError(
             "模型输出长度达到上限被截断（结构化结果不完整），"
             "该文献对当前模型过于复杂，建议改用全文文本模式重试"
         )
-    if not str(content).strip():
+    if not result["content"].strip():
         raise AIServiceError(
             "模型响应内容为空（可能是推理过程耗尽输出长度上限），"
             "建议改用全文文本模式重试"
         )
-    return str(content)
+    return result["content"]
+
+
+def chat_round(base_url: str, api_key: str, model: str,
+               messages: list, tools: list = None,
+               tool_choice: str = None,
+               timeout: int = None, on_waiting=None) -> dict:
+    """function calling 多轮循环的单轮原语（公开接口，供 agent 层驱动循环）。
+
+    与各 chat_with_* 的区别：不校验正文非空（工具轮 content 为空合法）、
+    不做 JSON 提取，调用方自行根据 tool_calls 决定继续循环还是收尾。
+
+    Args:
+        base_url: OpenAI 兼容网关根地址。
+        api_key: 明文 API 密钥。
+        model: 模型名称。
+        messages: 含完整多轮历史的消息体（首轮含 file/image 多模态部件）。
+        tools: OpenAI 工具 schema 列表；None 表示普通单轮对话。
+        tool_choice: 工具选择策略，默认 auto。
+        timeout: 可选超时秒数覆盖。
+        on_waiting: 可选等待心跳回调。
+    Returns:
+        {"content": str, "tool_calls": list, "finish_reason": str}
+    """
+    return _post_chat(base_url, api_key, model, messages,
+                      timeout=timeout, on_waiting=on_waiting,
+                      tools=tools, tool_choice=tool_choice)
+
+
+def build_file_content_item(file_id: str = None,
+                            file_path: str = None) -> dict:
+    """构造 chat/completions 多模态消息中的 file 部件。
+
+    Args:
+        file_id: /files 托管通道返回的文件标识（与 file_path 二选一）。
+        file_path: 本地文件路径，用于内联通道（仅 PDF，调用方负责类型与
+            大小校验及 Base64 编码时机；本函数直接读取并编码）。
+    Returns:
+        {"type": "file", ...} 消息部件字典。
+    Raises:
+        AIServiceError: 参数缺失、文件不存在或读取失败。
+    """
+    if file_id:
+        return {"type": "file", "file_id": file_id}
+    if file_path:
+        if not os.path.isfile(file_path):
+            raise AIServiceError("文献原件不存在，无法发送解析")
+        with open(file_path, "rb") as fp:
+            pdf_b64 = base64.b64encode(fp.read()).decode("ascii")
+        return {
+            "type": "file",
+            "file": {
+                "file_data": f"data:application/pdf;base64,{pdf_b64}",
+                "filename": os.path.basename(file_path),
+            },
+        }
+    raise AIServiceError("构造 file 消息部件需要 file_id 或 file_path")
 
 
 # ================= 原件通道分类 =================
@@ -376,6 +666,30 @@ def model_supports_file(model_name: str, base_url: str = "") -> bool:
     仅用于界面提示与路由预判；最终以 probe_file_parsing 的真实探测为准。
     """
     return file_channel_mode(model_name, base_url) != FILE_CHANNEL_NONE
+
+
+def resolve_file_channel(model: dict) -> str:
+    """展开当前模型持久化的原件通道配置，返回实际生效通道。
+
+    - 配置为 auto（或缺失）：按模型名/网关关键字启发式判定为
+      file_id / file_data / ""（无原件通道，走全文文本）；
+    - 显式配置 file_id / file_data：原样返回；
+    - 显式配置 none（仅全文文本）：返回 ""（FILE_CHANNEL_NONE）。
+
+    Args:
+        model: 模型配置字典（含 name/base_url/file_channel）。
+    Returns:
+        FILE_CHANNEL_ID / FILE_CHANNEL_DATA / FILE_CHANNEL_NONE（""）。
+    """
+    if not model:
+        return FILE_CHANNEL_NONE
+    configured = model.get("file_channel") or FILE_CHANNEL_AUTO
+    if configured == FILE_CHANNEL_AUTO:
+        return file_channel_mode(
+            model.get("name") or "", model.get("base_url") or "")
+    if configured in (FILE_CHANNEL_ID, FILE_CHANNEL_DATA):
+        return configured
+    return FILE_CHANNEL_NONE
 
 
 # ================= 配置校验探测 =================
@@ -508,7 +822,7 @@ def _probe_with_channel(base_url: str, api_key: str, model: str,
                 {"type": "text", "text": prompt},
             ],
         }]
-        call = lambda: _post_chat(
+        call = lambda: _post_chat_text(
             base_url, api_key, model, messages, C.AI_PROBE_MAX_TOKENS,
         )
 

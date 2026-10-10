@@ -8,12 +8,14 @@ from business.export_backup import ExportBackupService
 from business.literature_import import LiteratureImportService
 from business.literature_parse import LiteratureParseService
 from business.parse_rule_service import DIMENSION_KEYS, ParseRuleService
+from business.system_service import SystemService
 from config import constants as C
 from data_layer.dao.config_dao import SystemConfigDao
 from data_layer.dao.lit_info_dao import LiteratureInfoDao
 from data_layer.dao.report_dao import LiteratureReportDao
 from data_layer.dao.rule_dao import ParseRuleDao
 from tool_layer import export_generator, text_analysis
+from utils.exceptions import FileInvalidError
 
 PAPER_TEXT = """深度学习研究综述
 
@@ -105,6 +107,22 @@ def test_split_paragraphs():
     paragraphs = text_analysis.split_into_paragraphs(PAPER_TEXT)
     assert paragraphs[0] == {"pos": "0", "content": paragraphs[0]["content"]}
     assert all(item["pos"] == str(index) for index, item in enumerate(paragraphs))
+
+
+def test_extract_txt_normalizes_crlf_newlines(tmp_path):
+    """Windows 记事本保存的 CRLF 文献提取后换行统一为 LF，
+
+    保证 Agent 溯源校验按空行分段时不会把整篇误判为一段（锚点全部越界）。
+    """
+    from tool_layer import file_parser
+
+    crlf_path = tmp_path / "crlf.txt"
+    crlf_path.write_bytes("第一段正文。\r\n\r\n第二段正文。\r\n".encode("utf-8"))
+    text, _meta = file_parser.extract_txt_text(str(crlf_path))
+    assert "\r" not in text
+    assert text == "第一段正文。\n\n第二段正文。"
+    # 与溯源校验一致的按空行切分应得到两个段落
+    assert len([p for p in text.split("\n\n") if p.strip()]) == 2
 
 
 def test_parse_single_success(mem_conn, imported_lit):
@@ -241,9 +259,8 @@ def test_rule_detail_no_longer_has_keyword_count(mem_conn):
 
 def test_ai_prompt_requires_sentence_dimensions_and_keyword_field():
     """AI 提示词：维度字段必须是完整语句段落，keywords 仅作独立附加字段。"""
-    prompt = LiteratureParseService._build_ai_prompt(
-        {"dimensions": {key: True for key in DIMENSION_KEYS}}, precision=3
-    )
+    from agent import prompts
+    prompt = prompts.build_ai_analyze_prompt(precision=3)
     # 维度语句化强约束仍在
     assert "完整" in prompt and "句号" in prompt
     # keywords 作为独立附加字段被要求，且明确不得替代维度语句
@@ -431,3 +448,160 @@ def test_clear_report_missing_literature(mem_conn):
     code, _data, msg = LiteratureParseService().clear_report(999999)
     assert code == C.CODE_FILE_NOT_FOUND
     assert msg
+
+
+# ================= 阶段3：ReAct Agent 与业务层集成 =================
+
+def test_parse_default_runs_agent_local_engine(mem_conn, imported_lit):
+    """Agent 是唯一解析路径：未配置 AI 模型时离线走 agent_local 引擎。"""
+    code, report, msg = LiteratureParseService().parse_single(imported_lit)
+    assert code == 0, msg
+    assert report["parse_engine"] == "agent_local"
+    assert report["agent_warnings"] == []
+    assert "ReAct" in msg
+
+
+def test_parse_agent_exception_falls_back_to_local(
+        mem_conn, imported_lit, monkeypatch):
+    """Agent 运行期抛异常时自动回退纯本地规则兜底，解析不中断、报告正常落库。"""
+    def boom(*args, **kwargs):
+        raise RuntimeError("langgraph 模拟崩溃")
+
+    monkeypatch.setattr(
+        "business.literature_parse.run_parse_agent", boom)
+
+    code, report, msg = LiteratureParseService().parse_single(imported_lit)
+    assert code == 0, msg
+    assert report["parse_engine"] == "local"
+    assert "多尺度" in report["innovation_point"]
+    # 回退动作写入了操作日志
+    logs = SystemService().get_recent_logs(20)
+    assert any("Agent 异常已回退" in row.get("operate_content", "") for row in logs)
+
+
+def test_parse_agent_warnings_propagate_to_view(
+        mem_conn, imported_lit, monkeypatch):
+    """Agent 带三重校验告警完成时，warnings 透传到报告视图且报告仍成功。"""
+    def fake_agent(*args, **kwargs):
+        return {
+            "final_report": {
+                "research_background": "本地或AI产出的背景内容",
+                "core_view": "核心观点内容",
+                "research_method": "研究方法内容",
+                "innovation_point": "创新点内容",
+                "research_conclusion": "结论内容",
+                "reference_list": "[1] 参考文献",
+                "keywords": ["深度学习", "模块化"],
+                "engine": "agent_ai",
+                "verified": False,
+                "warnings": ["创新点 AI 解读未通过校验，已改用本地章节原文"],
+            },
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "business.literature_parse.run_parse_agent", fake_agent)
+
+    code, report, msg = LiteratureParseService().parse_single(imported_lit)
+    assert code == 0, msg
+    assert report["parse_engine"] == "agent_ai"
+    assert report["agent_warnings"]
+    assert "校验告警" in msg
+    assert report["keywords"] == ["深度学习", "模块化"]
+
+
+def test_parse_agent_fatal_failure_falls_back_and_marks_failed(
+        mem_conn, imported_lit, monkeypatch):
+    """Agent 判定致命失败（final_report 为空）→ 回退本地规则兜底 →
+    本地兜底同样因源文件缺失抛错 → 文献标记解析失败。"""
+    def fatal_agent(*args, **kwargs):
+        return {"final_report": None, "error": "全文提取失败：文件损坏"}
+
+    monkeypatch.setattr(
+        "business.literature_parse.run_parse_agent", fatal_agent)
+    # 同时让本地兜底的文本提取也失败，模拟源文件不可读
+    monkeypatch.setattr(
+        "business.literature_parse.LiteratureParseService._extract_lit_text",
+        lambda self, lit: (_ for _ in ()).throw(
+            RuntimeError("文件无法读取")))
+
+    code, _report, msg = LiteratureParseService().parse_single(imported_lit)
+    assert code != 0
+    assert "文件无法读取" in msg
+    lit = LiteratureInfoDao().select_by_id(imported_lit)
+    assert lit["is_parsed"] == C.PARSE_FAILED
+
+
+def test_parse_verify_fatal_empty_report_not_saved(
+        mem_conn, imported_lit, monkeypatch):
+    """Agent 三重校验判 fatal（全文为空，如 OCR 全部失败）：final_report
+    虽是非空字典但六维度全空——business 必须回退本地兜底，本地同样提取
+    失败时返回错误码、标记解析失败，绝不落库"成功的空报告"。"""
+    empty_report = {key: "" for key in (
+        "research_background", "core_view", "research_method",
+        "innovation_point", "research_conclusion", "reference_list")}
+    empty_report.update({
+        "keywords": [], "engine": "agent_local", "ai_channel": "",
+        "ai_error": "", "warnings": ["文献全文为空，无法解析"],
+        "verified": False,
+    })
+
+    def fatal_agent(*args, **kwargs):
+        return {
+            "final_report": empty_report,
+            "error": None,  # OCR 页失败按设计不写 state.error
+            "verify_result": {"fatal": True, "passed": False,
+                              "message": "文献全文为空，无法解析"},
+        }
+
+    monkeypatch.setattr(
+        "business.literature_parse.run_parse_agent", fatal_agent)
+    monkeypatch.setattr(
+        "business.literature_parse.LiteratureParseService._extract_lit_text",
+        lambda self, lit: (_ for _ in ()).throw(
+            FileInvalidError("PDF 无文本层（可能是纯扫描件），无法提取文字")))
+
+    code, report, msg = LiteratureParseService().parse_single(imported_lit)
+    assert code != 0
+    assert "无文本层" in msg
+    # 全空报告不得落库，文献标记解析失败供用户重试
+    assert LiteratureReportDao().get_by_lit_id(imported_lit) is None
+    lit = LiteratureInfoDao().select_by_id(imported_lit)
+    assert lit["is_parsed"] == C.PARSE_FAILED
+
+
+def test_batch_parse_each_lit_runs_independent_agent(
+        mem_conn, imported_lit, monkeypatch, tmp_path):
+    """批量解析时每篇文献独立调用一次 Agent。"""
+    # 再导入第二篇（内容必须不同，否则导入去重拦截）
+    second = tmp_path / "paper2.txt"
+    second.write_text(PAPER_TEXT + "\n补充材料：本文另含消融实验与误差分析附录。\n",
+                      encoding="utf-8")
+    code, data, msg = LiteratureImportService().import_single(str(second))
+    assert code == 0, msg
+
+    call_lit_ids = []
+
+    def recording_agent(lit_path, rule_detail, precision=3, model=None,
+                        lit_id=0, progress_callback=None, max_steps=None,
+                        degradation_callback=None):
+        call_lit_ids.append(lit_id)
+        return {
+            "final_report": {
+                "research_background": "背景", "core_view": "观点",
+                "research_method": "方法", "innovation_point": "创新",
+                "research_conclusion": "结论", "reference_list": "[1] 文献",
+                "keywords": ["深度学习"], "engine": "agent_local",
+                "verified": True, "warnings": [],
+            },
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "business.literature_parse.run_parse_agent", recording_agent)
+
+    result = LiteratureParseService().parse_batch(
+        [imported_lit, data["id"]])
+    assert result["failed"] == []
+    assert len(result["success"]) == 2
+    assert sorted(call_lit_ids) == sorted([imported_lit, data["id"]])

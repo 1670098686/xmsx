@@ -370,7 +370,7 @@ def original_success_tail(state: dict) -> list:
                           f"{page_count} 页",
             })
     elif (not (state.get("abs_text") or "").strip()
-            and not _ever_attempted(history, TOOL_EXTRACT_TEXT)
+            and not ever_attempted(history, TOOL_EXTRACT_TEXT)
             and TOOL_EXTRACT_TEXT not in fc["names"]):
         actions.append({
             "tool": TOOL_EXTRACT_TEXT, "args": {},
@@ -384,7 +384,7 @@ def original_success_tail(state: dict) -> list:
         (state.get("ai_drafts") or {}).get("reference_list") or "").strip())
     local_has_ref = bool(str(
         (state.get("local_drafts") or {}).get("reference_list") or "").strip())
-    detect_done = (_ever_attempted(history, TOOL_DETECT_STRUCTURE)
+    detect_done = (ever_attempted(history, TOOL_DETECT_STRUCTURE)
                    or TOOL_DETECT_STRUCTURE in fc["names"])
     if (refs_enabled and not ai_has_ref and not local_has_ref
             and not detect_done):
@@ -401,7 +401,7 @@ def original_success_tail(state: dict) -> list:
 
     # 3) 本地关键词始终执行（含表格/图表补充文本，以本地结果入库）
     if (not state.get("keywords")
-            and not _tool_ever_succeeded(state, TOOL_EXTRACT_KEYWORDS)):
+            and not tool_ever_succeeded(state, TOOL_EXTRACT_KEYWORDS)):
         tagged.append(keyword_tail_action())
     return tagged
 
@@ -424,8 +424,12 @@ def keyword_tail_action() -> dict:
                           C.AGENT_PCT_KEYWORD_TAIL_END)
 
 
-def _ever_attempted(history: list, tool_name: str) -> bool:
-    """历史中是否出现过该工具调用（不区分成功失败）。"""
+def ever_attempted(history: list, tool_name: str) -> bool:
+    """历史中是否出现过该工具调用（不区分成功失败）。
+
+    节点层（如 Reflect）与 Director 共用的历史判定，故为公共函数；
+    ``history`` 为 None 时按空历史处理。
+    """
     return any(item.get("tool") == tool_name for item in (history or []))
 
 
@@ -724,7 +728,7 @@ def _recovery_action(state: dict, missing: list) -> dict | None:
                     "args": {"page_index": next_page, "mode": OCR_MODE_AUTO},
                     "reason": f"确定性恢复：继续逐页识别第 {next_page + 1} 页",
                 }
-        elif not _tool_ever_succeeded(state, TOOL_EXTRACT_TEXT):
+        elif not tool_ever_succeeded(state, TOOL_EXTRACT_TEXT):
             return {
                 "tool": TOOL_EXTRACT_TEXT, "args": {},
                 "reason": "确定性恢复：先补取文献全文再补维度",
@@ -739,8 +743,8 @@ def _recovery_action(state: dict, missing: list) -> dict | None:
     return None
 
 
-def _tool_ever_succeeded(state: dict, tool_name: str) -> bool:
-    """历史中该工具是否成功执行过。"""
+def tool_ever_succeeded(state: dict, tool_name: str) -> bool:
+    """历史中该工具是否成功执行过（节点层与 Director 共用）。"""
     return any(
         item.get("tool") == tool_name and (item.get("output") or {}).get("ok")
         for item in state.get("tool_history") or []

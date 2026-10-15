@@ -617,13 +617,11 @@ def test_qwen38_inline_failure_allow_text_retry(mem_conn, imported_pdf_lit,
     且传入的是本地提取全文，不固化调用次数。
     """
     _patch_model(monkeypatch, name="qwen3.8-max")
-    inline_error = "PDF 原件过大（约 120MB），超过内联发送上限 100MB"
-
-    def _fake_inline(*a, **k):
-        raise AIServiceError(inline_error)
+    # file_data 通道在发送前由本地体积校验拦截：把内联上限压到极小值，
+    # 无需真实网络即可稳定触发"超限可降级"分支（错误消息含"超过内联"）
+    monkeypatch.setattr(C, "AI_PDF_INLINE_MAX_BYTES", 1)
 
     text_calls = []
-    monkeypatch.setattr(ai_client, "chat_with_local_pdf", _fake_inline)
     monkeypatch.setattr(ai_client, "upload_file",
                         lambda *a, **k: "should-not-be-called")
     monkeypatch.setattr(
@@ -637,7 +635,7 @@ def test_qwen38_inline_failure_allow_text_retry(mem_conn, imported_pdf_lit,
     assert code == 0, msg
     assert text_calls  # 已降级到全文文本通道
     assert isinstance(text_calls[0], str) and text_calls[0].strip()
-    assert asked == [inline_error]
+    assert len(asked) == 1 and "超过内联" in asked[0]
 
 
 def test_qwen38_inline_failure_without_callback_falls_back_local(
@@ -645,12 +643,15 @@ def test_qwen38_inline_failure_without_callback_falls_back_local(
 ):
     """PDF 内联失败但错误不可降级（非协议拒绝/非超限）且无授权：直接转本地。"""
     _patch_model(monkeypatch, name="qwen3.8-max")
+    inline_error = "模型服务返回错误（400）：PDF 解析失败"
     text_calls = []
-    monkeypatch.setattr(
-        ai_client, "chat_with_local_pdf",
-        lambda *a, **k: (_ for _ in ()).throw(
-            AIServiceError("模型服务返回错误（400）：PDF 解析失败")),
-    )
+
+    def _chat_round_fails(*a, **k):
+        """读中循环首轮对话即被网关以非协议理由拒绝（不触发同框降级）。"""
+        raise AIServiceError(inline_error)
+
+    # Agent 原件通读现统一直达 chat_round（file_data 部件在其中内联发送）
+    monkeypatch.setattr(ai_client, "chat_round", _chat_round_fails)
     monkeypatch.setattr(ai_client, "chat_with_text",
                         lambda *a, **k: text_calls.append(1))
     code, report, msg = LiteratureParseService().parse_single(imported_pdf_lit)
@@ -890,7 +891,7 @@ def test_probe_auto_unknown_model_falls_back_to_file_id(monkeypatch):
 
     monkeypatch.setattr(ai_client, "chat_with_local_pdf", _inline_rejected)
     monkeypatch.setattr(ai_client, "upload_file", _fake_upload)
-    monkeypatch.setattr(ai_client, "_post_chat", _fake_chat)
+    monkeypatch.setattr(ai_client, "_post_chat_text", _fake_chat)
     reply, channel = ai_client.probe_file_parsing(
         "https://model.example.test/v1", "sk-test-key", "vendor-long-context",
         mode=ai_client.FILE_CHANNEL_AUTO,
@@ -952,7 +953,7 @@ def test_probe_auto_inline_without_token_falls_through_to_file_id(monkeypatch):
         lambda base_url, api_key, file_path: "fid-2",
     )
     monkeypatch.setattr(
-        ai_client, "_post_chat",
+        ai_client, "_post_chat_text",
         lambda *a, **k:
         "AI configuration test document. Probe token: ZXQ-4827.",
     )
@@ -986,7 +987,7 @@ def test_probe_explicit_file_id_skips_inline(monkeypatch):
         lambda base_url, api_key, file_path: "fid-1",
     )
     monkeypatch.setattr(
-        ai_client, "_post_chat",
+        ai_client, "_post_chat_text",
         lambda *a, **k: "AI configuration test document. Probe token: ZXQ-4827.",
     )
     reply, channel = ai_client.probe_file_parsing(
@@ -1086,14 +1087,14 @@ def test_post_chat_detects_length_truncation(monkeypatch):
 
     monkeypatch.setattr(ai_client, "_http_post", _fake_http_post)
     with pytest.raises(AIServiceError) as exc_info:
-        ai_client._post_chat(
+        ai_client._post_chat_text(
             "https://model.example.test/v1", "sk", "qwen3.8-max", [],
         )
     assert "截断" in exc_info.value.message
 
 
 def test_post_chat_empty_content_raises(monkeypatch):
-    """思考耗尽预算导致 content 为空：抛可降级的明确错误，不放行空串。"""
+    """思考耗尽预算导致 content 为空：包装层抛可降级的明确错误，不放行空串。"""
     monkeypatch.setattr(
         ai_client, "_http_post",
         lambda url, headers, body, timeout, on_waiting=None:
@@ -1101,14 +1102,14 @@ def test_post_chat_empty_content_raises(monkeypatch):
                       "finish_reason": "stop"}]},
     )
     with pytest.raises(AIServiceError) as exc_info:
-        ai_client._post_chat(
+        ai_client._post_chat_text(
             "https://model.example.test/v1", "sk", "qwen3.8-max", [],
         )
     assert "为空" in exc_info.value.message
 
 
 def test_post_chat_normal_response_returns_content(monkeypatch):
-    """正常 stop 响应原样返回正文。"""
+    """正常 stop 响应：底层返回结构化 dict，文本包装层取出正文。"""
     payload = {"choices": [{
         "message": {"content": "结果文本"}, "finish_reason": "stop",
     }]}
@@ -1116,7 +1117,15 @@ def test_post_chat_normal_response_returns_content(monkeypatch):
         ai_client, "_http_post",
         lambda url, headers, body, timeout, on_waiting=None: payload,
     )
-    assert ai_client._post_chat(
+    # _post_chat 新契约：content/tool_calls/finish_reason 三键字典
+    result = ai_client._post_chat(
+        "https://model.example.test/v1", "sk", "m", [],
+    )
+    assert result == {
+        "content": "结果文本", "tool_calls": [], "finish_reason": "stop",
+    }
+    # 文本包装层校验后返回正文纯字符串
+    assert ai_client._post_chat_text(
         "https://model.example.test/v1", "sk", "m", [],
     ) == "结果文本"
 

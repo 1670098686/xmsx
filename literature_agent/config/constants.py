@@ -12,13 +12,6 @@ LIT_TYPE_TXT = "TXT"
 LIT_TYPE_DOCX = "DOCX"
 LIT_TYPE_DOC = "DOC"
 
-SUFFIX_TO_TYPE = {
-    ".pdf": LIT_TYPE_PDF,
-    ".txt": LIT_TYPE_TXT,
-    ".docx": LIT_TYPE_DOCX,
-    ".doc": LIT_TYPE_DOC,
-}
-
 # 检索页格式筛选下拉（固定顺序）与中文显示名
 LIT_TYPE_OPTIONS = (LIT_TYPE_PDF, LIT_TYPE_TXT, LIT_TYPE_DOCX, LIT_TYPE_DOC)
 LIT_TYPE_LABELS = {
@@ -63,8 +56,7 @@ RENDER_MASK_DELAY_MS = 200
 # 单次转换超时秒数（Office 冷启动可能较慢）
 DOC_CONVERT_TIMEOUT_SEC = 120
 
-# OLE2 复合文档魔数（旧版 .doc/.xls 等）与 ZIP 魔数（OOXML .docx 实质为 zip）
-OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+# ZIP 魔数（OOXML .docx 实质为 zip，用于识别改名 .doc 的 .docx）
 ZIP_MAGIC = b"PK\x03\x04"
 
 # ========== 解析状态（literature_info.is_parsed）==========
@@ -108,10 +100,8 @@ CODE_ERROR = 1                # 通用错误
 CODE_FILE_NOT_FOUND = 2       # 文件不存在
 CODE_FILE_INVALID = 3         # 文件格式不支持/文件损坏
 CODE_PARSE_FAILED = 4         # 解析失败
-CODE_DB_ERROR = 5             # 数据库错误
-CODE_STORAGE_NOT_ENOUGH = 6   # 存储空间不足
+# 码值 5/6/8 为迭代中废弃的历史返回码（数据库错误/空间不足/权限拒绝），保留 7、9 原码值不复用
 CODE_DUPLICATE = 7            # 文件/数据重复
-CODE_PERMISSION_DENIED = 8    # 权限不足
 CODE_AI_SERVICE = 9           # AI 模型服务调用失败
 
 # ========== 笔记类型（literature_note.note_type）==========
@@ -161,7 +151,6 @@ MARK_COMMENT_BG_ALPHA = 70       # 文字批注浅底透明度
 MARK_LINE_ALPHA = 230            # 下划线/删除线颜色透明度
 MARK_LINE_WIDTH_PX = 2           # 下划线/删除线线宽（像素）
 MARK_SELECTED_BORDER_ALPHA = 200  # 选中标记描边透明度
-PDF_MARK_WORD_HIT_PT = 6.0       # PDF 词命中容差（PDF 点），未直接命中时吸附最近词
 
 # ========== 系统配置键名（system_config.config_key）==========
 CFG_LITERATURE_PATH = "literature_path"
@@ -325,8 +314,7 @@ AGENT_VERIFY_MIN_LOCAL_CHARS = 30
 # 整体 AI 解读提速：本地章节达到该字数即视为内容充实，
 # 该维度不再交 AI 复述（直接用本地原文）；全部维度充实则跳过本次 AI 调用
 AGENT_LOCAL_DIM_SELF_SUFFICIENT_CHARS = 50
-# 喂给规划器/观测的文献片段长度
-AGENT_PLAN_TEXT_HEAD = 2000
+# 喂给观测节点的文献片段长度
 AGENT_OBSERVATION_TEXT_HEAD = 1200
 
 # ========== 阶段2：原件视觉感知（inspect_document / ocr_page） ==========

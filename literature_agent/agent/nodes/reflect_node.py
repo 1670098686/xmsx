@@ -53,7 +53,7 @@ def reflect_node(state: dict) -> dict:
     if layout is None:
         return {}  # 防御：无布局无文本时 Verify 按致命失败收尾
     history = state.get("tool_history") or []
-    original_ok = director._tool_ever_succeeded(state, TOOL_AI_READ_ORIGINAL)
+    original_ok = director.tool_ever_succeeded(state, TOOL_AI_READ_ORIGINAL)
 
     # ============ 原件读中循环成功：条件本地尾部（基线→关键词） ============
     if original_ok:
@@ -73,14 +73,14 @@ def reflect_node(state: dict) -> dict:
     # 阶段 3：扫描件逐页 OCR 完成（仅降级路径——首轮无通道时 OCR 与尾部
     # 已一次性成链，不会走到这里）→ 接结构化尾部
     if (layout.get("is_scanned")
-            and _ever_attempted(history, TOOL_OCR_PAGE)
-            and not _ever_attempted(history, TOOL_DETECT_STRUCTURE)
+            and director.ever_attempted(history, TOOL_OCR_PAGE)
+            and not director.ever_attempted(history, TOOL_DETECT_STRUCTURE)
             and not original_ok):
         return director.structure_tail_update(state, layout)
 
     # 阶段 4：全文提取完成（无原件通道/原件失败降级）→ 确定性结构化尾部
-    if (director._tool_ever_succeeded(state, TOOL_EXTRACT_TEXT)
-            and not _ever_attempted(history, TOOL_DETECT_STRUCTURE)
+    if (director.tool_ever_succeeded(state, TOOL_EXTRACT_TEXT)
+            and not director.ever_attempted(history, TOOL_DETECT_STRUCTURE)
             and not original_ok):
         return director.structure_tail_update(state, layout)
 
@@ -143,11 +143,6 @@ def reflect_router(state: dict) -> str:
             state.get("max_steps", C.AGENT_MAX_STEPS)):
         return ROUTE_ACT
     return ROUTE_VERIFY
-
-
-def _ever_attempted(history: list, tool_name: str) -> bool:
-    """历史中是否出现过该工具调用（不区分成功失败）。"""
-    return any(item.get("tool") == tool_name for item in history)
 
 
 def _post_inspect_started(history: list) -> bool:

@@ -403,3 +403,54 @@ def test_resolve_time_range_bounds():
         C.TIME_RANGE_ALL, monday
     ) is None
     assert search_module._resolve_time_range_bounds("unknown", monday) is None
+
+
+# ================= LIKE 通配符按字面量匹配（回归）=================
+
+def _insert_lit_for_like(mem_conn, title, file_hash):
+    """插入最小字段文献，供通配符转义回归使用。"""
+    LiteratureInfoDao(mem_conn).insert({
+        "literature_title": title,
+        "literature_author": "未知",
+        "publish_time": "",
+        "journal_source": "",
+        "literature_type": "TXT",
+        "file_path": f"{file_hash}.txt",
+        "file_size": 1,
+        "file_hash": file_hash,
+        "category_id": 0,
+        "is_parsed": 0,
+    })
+
+
+def test_search_underscore_is_literal(mem_conn):
+    """下划线是 LIKE 单字符通配符：搜 a_b 不得误命中 aXb。"""
+    _insert_lit_for_like(mem_conn, "a_b 精确文献", "h-under-1")
+    _insert_lit_for_like(mem_conn, "aXb 对照文献", "h-under-2")
+    dao = LiteratureInfoDao(mem_conn)
+
+    assert [r["literature_title"] for r in dao.search({"keyword": "a_b"})] == \
+        ["a_b 精确文献"]
+    assert [r["literature_title"]
+            for r in dao.search_by_title("a_b")] == ["a_b 精确文献"]
+    # 普通子串匹配不受影响
+    assert [r["literature_title"] for r in dao.search({"keyword": "aXb"})] == \
+        ["aXb 对照文献"]
+
+
+def test_search_percent_is_literal(mem_conn):
+    """百分号是 LIKE 多字符通配符：搜 50% 只命中含字面 50% 的文献。"""
+    _insert_lit_for_like(mem_conn, "含50%百分号的标题", "h-pct-1")
+    _insert_lit_for_like(mem_conn, "完全无关的标题", "h-pct-2")
+    code, rows, _ = LiteratureSearchService().full_text_search("50%")
+    assert code == 0
+    assert [r["literature_title"] for r in rows] == ["含50%百分号的标题"]
+
+
+def test_search_backslash_is_literal(mem_conn):
+    """反斜杠作为 ESCAPE 转义符本身也按字面量匹配，不吞掉后续字符。"""
+    _insert_lit_for_like(mem_conn, r"路径 a\b 测试", "h-bs-1")
+    _insert_lit_for_like(mem_conn, "aXb 对照", "h-bs-2")
+    code, rows, _ = LiteratureSearchService().full_text_search(r"a\b")
+    assert code == 0
+    assert [r["literature_title"] for r in rows] == [r"路径 a\b 测试"]

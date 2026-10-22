@@ -2,6 +2,26 @@
 from data_layer.dao import BaseDao
 
 
+def _escape_like(text: str) -> str:
+    """转义 SQLite LIKE 通配符，使用户输入按字面量匹配。
+
+    参数化查询只能防 SQL 注入，无法阻止 % / _ 被解释为通配符
+    （如搜 "a_b" 会误命中 "aXb"），故需配合 SQL 的 ESCAPE '\\' 子句
+    显式转义反斜杠本身及 %、_ 两个通配符。
+
+    Args:
+        text: 用户输入的原始检索词。
+    Returns:
+        转义后的安全字符串。
+    """
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
 class LiteratureInfoDao(BaseDao):
     """文献基础信息表 CRUD（仅原子操作，不含业务判断）。"""
 
@@ -111,11 +131,12 @@ class LiteratureInfoDao(BaseDao):
         return self.row_to_dict(row)
 
     def search_by_title(self, keyword: str) -> list:
-        """按标题模糊检索（参数化 LIKE）。"""
+        """按标题模糊检索（参数化 LIKE，通配符按字面量匹配）。"""
+        like = f"%{_escape_like(keyword)}%"
         rows = self.conn.execute(
-            "SELECT * FROM literature_info WHERE literature_title LIKE ? "
+            "SELECT * FROM literature_info WHERE literature_title LIKE ? ESCAPE '\\' "
             "ORDER BY create_time DESC",
-            (f"%{keyword}%",),
+            (like,),
         ).fetchall()
         return self.rows_to_list(rows)
 
@@ -167,26 +188,26 @@ class LiteratureInfoDao(BaseDao):
 
         keyword = (filters.get("keyword") or "").strip()
         if keyword:
-            like = f"%{keyword}%"
+            like = f"%{_escape_like(keyword)}%"
+            like_escape = " LIKE ? ESCAPE '\\'"
             where_parts.append(
-                "(l.literature_title LIKE ? OR l.literature_author LIKE ? "
-                "OR l.journal_source LIKE ?"
+                f"(l.literature_title{like_escape} OR l.literature_author{like_escape} "
+                f"OR l.journal_source{like_escape}"
                 # 标签名
-                " OR EXISTS (SELECT 1 FROM literature_tag lt2 "
-                "JOIN category_tag ct ON ct.id = lt2.tag_id "
-                "WHERE lt2.literature_id = l.id AND ct.tag_name LIKE ?)"
+                f" OR EXISTS (SELECT 1 FROM literature_tag lt2 "
+                f"JOIN category_tag ct ON ct.id = lt2.tag_id "
+                f"WHERE lt2.literature_id = l.id AND ct.tag_name{like_escape})"
                 # 笔记内容
-                " OR EXISTS (SELECT 1 FROM literature_note n "
-                "WHERE n.literature_id = l.id AND n.note_content LIKE ?)"
+                f" OR EXISTS (SELECT 1 FROM literature_note n "
+                f"WHERE n.literature_id = l.id AND n.note_content{like_escape})"
                 # 已解析报告（结构化后的正文核心段落）
-                " OR EXISTS (SELECT 1 FROM literature_report r "
-                "WHERE r.literature_id = l.id AND ("
-                "r.research_background LIKE ? OR r.core_view LIKE ? "
-                "OR r.research_method LIKE ? OR r.innovation_point LIKE ? "
-                "OR r.research_conclusion LIKE ? OR r.reference_list LIKE ?)))"
+                f" OR EXISTS (SELECT 1 FROM literature_report r "
+                f"WHERE r.literature_id = l.id AND ("
+                f"r.research_background{like_escape} OR r.core_view{like_escape} "
+                f"OR r.research_method{like_escape} OR r.innovation_point{like_escape} "
+                f"OR r.research_conclusion{like_escape} OR r.reference_list{like_escape})))"
             )
-            params.extend([like, like, like, like, like,
-                           like, like, like, like, like, like])
+            params.extend([like] * 11)
 
         tag_id = filters.get("tag_id")
         if tag_id:
